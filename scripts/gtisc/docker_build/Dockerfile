@@ -12,16 +12,6 @@ RUN echo '%sudo ALL=(ALL) NOPASSWD:ALL' >> /etc/sudoers
 
 RUN apt install python-is-python3
 
-# Detect repo updates
-ADD https://api.github.com/repos/GTISC/s2e/git/refs/heads/master /tmp/s2e.version
-ADD https://api.github.com/repos/GTISC/s2e-env/git/refs/heads/master /tmp/s2e-env.version
-ADD https://api.github.com/repos/GTISC/manifest/git/refs/heads/master /tmp/manifest.version
-ADD https://api.github.com/repos/GTISC/qemu/git/refs/heads/v3.0.0-se /tmp/qemu.version
-ADD https://api.github.com/repos/GTISC/guest-images/git/refs/heads/master /tmp/guest-images.version
-ADD https://api.github.com/repos/GTISC/decree/git/refs/heads/master /tmp/decree.version
-ADD https://api.github.com/repos/GTISC/s2e-linux-kernel/git/refs/heads/master /tmp/s2e-linux-kernel.version
-RUN rm /tmp/*.version
-
 USER s2e
 WORKDIR /home/s2e
 
