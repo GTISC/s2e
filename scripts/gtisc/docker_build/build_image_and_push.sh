@@ -8,6 +8,7 @@ if [[ -z "${DOCKER_REGISTRY_PASS}" ]]; then
   exit 1
 fi
 
+cd "$(dirname "$0")"
 docker build --no-cache -t super.gtisc.gatech.edu/s2e:latest .
 
 docker login super.gtisc.gatech.edu --username=$DOCKER_REGISTRY_USER --password=$DOCKER_REGISTRY_PASS
