@@ -6,6 +6,7 @@ on:
   push:
     branches:
       - master
+      - rebuild-image # used only for testing CI, should be removed before PR merging
 jobs:
   build:
       runs-on: ${{ matrix.runner }}
