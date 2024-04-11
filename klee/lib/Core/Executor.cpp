@@ -323,15 +323,15 @@ Executor::StatePair Executor::fork(ExecutionState &current, const ref<Expr> &con
     klee_warning_once(nullptr, "Executor::fork 4");
     if (current.forkDisabled) {
         if (conditionIsTrue) {
-            if (!current.addConstraint(condition)) {
-                abort();
-            }
+            //if (!current.addConstraint(condition)) {
+            //    abort();
+            //}
             klee_warning_once(nullptr, "Executor::fork 5");
             return StatePair(&current, nullptr);
         } else {
-            if (!current.addConstraint(Expr::createIsZero(condition))) {
-                abort();
-            }
+            //if (!current.addConstraint(Expr::createIsZero(condition))) {
+            //    abort();
+            //}
             klee_warning_once(nullptr, "Executor::fork 6");
             return StatePair(nullptr, &current);
         }
