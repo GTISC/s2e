@@ -302,12 +302,14 @@ void Executor::notifyBranch(ExecutionState &state) {
 Executor::StatePair Executor::fork(ExecutionState &current, const ref<Expr> &condition_,
                                    bool keepConditionTrueInCurrentState) {
     auto condition = current.simplifyExpr(condition_);
-
+    klee_warning_once(nullptr, "Executor::fork 1");
     // If we are passed a constant, no need to do anything
     if (auto ce = dyn_cast<ConstantExpr>(condition)) {
         if (ce->isTrue()) {
+            klee_warning_once(nullptr, "Executor::fork 2");
             return StatePair(&current, nullptr);
         } else {
+            klee_warning_once(nullptr, "Executor::fork 3");
             return StatePair(nullptr, &current);
         }
     }
@@ -318,16 +320,19 @@ Executor::StatePair Executor::fork(ExecutionState &current, const ref<Expr> &con
     check(ce, "Could not evaluate the expression to a constant.");
     
     bool conditionIsTrue = ce->isTrue();
+    klee_warning_once(nullptr, "Executor::fork 4");
     if (current.forkDisabled) {
         if (conditionIsTrue) {
             if (!current.addConstraint(condition)) {
                 abort();
             }
+            klee_warning_once(nullptr, "Executor::fork 5");
             return StatePair(&current, nullptr);
         } else {
             if (!current.addConstraint(Expr::createIsZero(condition))) {
                 abort();
             }
+            klee_warning_once(nullptr, "Executor::fork 6");
             return StatePair(nullptr, &current);
         }
     }
@@ -344,31 +349,36 @@ Executor::StatePair Executor::fork(ExecutionState &current, const ref<Expr> &con
             return StatePair(nullptr, &current);
         }
         conditionIsTrue = true;
+        klee_warning_once(nullptr, "Executor::fork 7");
     }
 
     // Build constraints for branched state
     ConstraintManager tmpConstraints = current.constraints();
     if (conditionIsTrue) {
         tmpConstraints.addConstraint(Expr::createIsZero(condition));
+        klee_warning_once(nullptr, "Executor::fork 8");
     } else {
         tmpConstraints.addConstraint(condition);
+        klee_warning_once(nullptr, "Executor::fork 9");
     }
 
     AssignmentPtr concolics = Assignment::create(true);
     
     if (!current.solve(tmpConstraints, *concolics)) {
-        //std::string constraints_str;
-        //llvm::raw_string_ostream rso(constraints_str);
-        //current.dumpQuery(rso);
-        //klee_warning_once(nullptr, "Executor::fork 15");
-        //klee_warning_once(nullptr, "%s", constraints_str.c_str());
+        std::string constraints_str;
+        llvm::raw_string_ostream rso(constraints_str);
+        current.dumpQuery(rso);
+        klee_warning_once(nullptr, "Executor::fork enable to solve");
+        klee_warning_once(nullptr, "%s", constraints_str.c_str());
         if (conditionIsTrue) {
+            klee_warning_once(nullptr, "Executor::fork 10");
             return StatePair(&current, nullptr);
         } else {
+            klee_warning_once(nullptr, "Executor::fork 11");
             return StatePair(nullptr, &current);
         }
     }
-
+    klee_warning_once(nullptr, "Executor::fork 12");
     // Branch
     ExecutionState *branchedState;
     notifyBranch(current);
@@ -406,7 +416,7 @@ Executor::StatePair Executor::fork(ExecutionState &current, const ref<Expr> &con
         falseState = &current;
         trueState = branchedState;
     }
-
+    klee_warning_once(nullptr, "Executor::fork 13");
     return StatePair(trueState, falseState);
 }
 
