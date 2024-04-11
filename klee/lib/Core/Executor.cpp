@@ -368,7 +368,7 @@ Executor::StatePair Executor::fork(ExecutionState &current, const ref<Expr> &con
         std::string constraints_str;
         llvm::raw_string_ostream rso(constraints_str);
         current.dumpQuery(rso);
-        klee_warning_once(nullptr, "Executor::fork enable to solve");
+        klee_warning_once(nullptr, "Executor::fork unable to solve");
         klee_warning_once(nullptr, "%s", constraints_str.c_str());
         if (conditionIsTrue) {
             klee_warning_once(nullptr, "Executor::fork 10");
