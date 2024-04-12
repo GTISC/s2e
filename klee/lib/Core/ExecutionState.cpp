@@ -57,7 +57,7 @@ std::set<ObjectKey, ObjectKeyLTS> ExecutionState::s_ignoredMergeObjects;
 
 ExecutionState::ExecutionState(KFunction *kf)
     : pc(kf->getInstructions()), prevPC(nullptr), addressSpace(this), forkDisabled(false),
-      concolics(Assignment::create(true)) {
+      concolics(Assignment::create(true)), addConstraintWhenForkingIsDisabled(false) {
     pushFrame(0, kf);
 }
 

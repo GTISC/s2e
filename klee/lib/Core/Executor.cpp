@@ -320,12 +320,12 @@ Executor::StatePair Executor::fork(ExecutionState &current, const ref<Expr> &con
     bool conditionIsTrue = ce->isTrue();
     if (current.forkDisabled) {
         if (conditionIsTrue) {
-            if (!current.addConstraint(condition)) {
+            if (current.addConstraintWhenForkingIsDisabled && !current.addConstraint(condition)) {
                 abort();
             }
             return StatePair(&current, nullptr);
         } else {
-            if (!current.addConstraint(Expr::createIsZero(condition))) {
+            if (current.addConstraintWhenForkingIsDisabled && !current.addConstraint(Expr::createIsZero(condition))) {
                 abort();
             }
             return StatePair(nullptr, &current);
