@@ -320,13 +320,20 @@ Executor::StatePair Executor::fork(ExecutionState &current, const ref<Expr> &con
     bool conditionIsTrue = ce->isTrue();
     if (current.forkDisabled) {
         if (conditionIsTrue) {
-            if (current.addConstraintWhenForkingIsDisabled && !current.addConstraint(condition)) {
-                abort();
+            if(current.addConstraintWhenForkingIsDisabled ) {
+                klee_warning_once(nullptr, "addConstraintWhenForkingIsDisabled=1, 1");
+                if (!current.addConstraint(condition)) {
+                    abort();
+                }
             }
+            
             return StatePair(&current, nullptr);
         } else {
-            if (current.addConstraintWhenForkingIsDisabled && !current.addConstraint(Expr::createIsZero(condition))) {
-                abort();
+            if(current.addConstraintWhenForkingIsDisabled ) {
+                klee_warning_once(nullptr, "addConstraintWhenForkingIsDisabled=1, 2");
+                if (!current.addConstraint(Expr::createIsZero(condition))) {
+                    abort();
+                }
             }
             return StatePair(nullptr, &current);
         }
