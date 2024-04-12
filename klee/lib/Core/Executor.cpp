@@ -319,13 +319,13 @@ Executor::StatePair Executor::fork(ExecutionState &current, const ref<Expr> &con
     bool conditionIsTrue = ce->isTrue();
     if (current.forkDisabled) {
         if (conditionIsTrue) {
-            if (current.addConstraintWhenForkingIsDisabled && 
+            if (current.addConstraintWhenForkingDisabled && 
                 !current.addConstraint(condition)) {
                 abort();
             }
             return StatePair(&current, nullptr);
         } else {
-            if (current.addConstraintWhenForkingIsDisabled && 
+            if (current.addConstraintWhenForkingDisabled && 
                 !current.addConstraint(Expr::createIsZero(condition))) {
                     abort();
             }

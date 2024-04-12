@@ -805,16 +805,16 @@ void BaseInstructions::handleBuiltInOps(S2EExecutionState *state, uint64_t opcod
         }
 
         case BASE_S2E_GET_ADD_CONSTRAINT_WHEN_FORKING_DISABLED: {
-            bool res = state->addConstraintWhenForkingIsDisabled;
+            bool res = state->addConstraintWhenForkingDisabled;
             state->regs()->write(CPU_OFFSET(regs[R_EAX]), &res, sizeof(res));
-            getDebugStream(state) << "BaseInstructions: getting addConstraintWhenForkingIsDisabled = " << res << "\n";
+            getDebugStream(state) << "BaseInstructions: getting addConstraintWhenForkingDisabled = " << res << "\n";
             break;
         }
 
         case BASE_S2E_SET_ADD_CONSTRAINT_WHEN_FORKING_DISABLED: {
             int arg = (int) state->regs()->read<uint64_t>(CPU_OFFSET(regs[R_EAX]));
-            state->addConstraintWhenForkingIsDisabled = (bool) arg;
-            getDebugStream(state) << "BaseInstructions: setting addConstraintWhenForkingIsDisabled = " << arg << "\n";
+            state->addConstraintWhenForkingDisabled = (bool) arg;
+            getDebugStream(state) << "BaseInstructions: setting addConstraintWhenForkingDisabled = " << arg << "\n";
             break;
         }
 

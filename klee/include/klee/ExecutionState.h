@@ -79,7 +79,7 @@ public:
     bool forkDisabled;
 
     /// Whether to add the constraints at branches when forking is disabled
-    bool addConstraintWhenForkingIsDisabled;
+    bool addConstraintWhenForkingDisabled;
 
     /// ordered list of symbolics: used to generate test cases.
     std::vector<ArrayPtr> symbolics;
