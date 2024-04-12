@@ -302,7 +302,6 @@ void Executor::notifyBranch(ExecutionState &state) {
 Executor::StatePair Executor::fork(ExecutionState &current, const ref<Expr> &condition_,
                                    bool keepConditionTrueInCurrentState) {
     auto condition = current.simplifyExpr(condition_);
-
     // If we are passed a constant, no need to do anything
     if (auto ce = dyn_cast<ConstantExpr>(condition)) {
         if (ce->isTrue()) {
@@ -320,33 +319,16 @@ Executor::StatePair Executor::fork(ExecutionState &current, const ref<Expr> &con
     bool conditionIsTrue = ce->isTrue();
     if (current.forkDisabled) {
         if (conditionIsTrue) {
-            if(current.addConstraintWhenForkingIsDisabled ) {
-                klee_warning_once(nullptr, "addConstraintWhenForkingIsDisabled=1, 1");
-                if (!current.addConstraint(condition)) {
-                    abort();
-                }
+            if (current.addConstraintWhenForkingIsDisabled && 
+                !current.addConstraint(condition)) {
+                abort();
             }
-            std::string constraints_str;
-            llvm::raw_string_ostream rso(constraints_str);
-            current.dumpQuery(rso);
-            klee_warning_once(nullptr, "Executor::fork 15");
-            klee_warning_once(nullptr, "%s", constraints_str.c_str());
-            
             return StatePair(&current, nullptr);
         } else {
-            if(current.addConstraintWhenForkingIsDisabled ) {
-                klee_warning_once(nullptr, "addConstraintWhenForkingIsDisabled=1, 2");
-                if (!current.addConstraint(Expr::createIsZero(condition))) {
+            if (current.addConstraintWhenForkingIsDisabled && 
+                !current.addConstraint(Expr::createIsZero(condition))) {
                     abort();
-                }
             }
-
-            std::string constraints_str;
-            llvm::raw_string_ostream rso(constraints_str);
-            current.dumpQuery(rso);
-            klee_warning_once(nullptr, "Executor::fork 16");
-            klee_warning_once(nullptr, "%s", constraints_str.c_str());
-            
             return StatePair(nullptr, &current);
         }
     }
