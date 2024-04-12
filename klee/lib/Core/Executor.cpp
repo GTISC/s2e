@@ -326,6 +326,11 @@ Executor::StatePair Executor::fork(ExecutionState &current, const ref<Expr> &con
                     abort();
                 }
             }
+            std::string constraints_str;
+            llvm::raw_string_ostream rso(constraints_str);
+            current.dumpQuery(rso);
+            klee_warning_once(nullptr, "Executor::fork 15");
+            klee_warning_once(nullptr, "%s", constraints_str.c_str());
             
             return StatePair(&current, nullptr);
         } else {
@@ -335,6 +340,13 @@ Executor::StatePair Executor::fork(ExecutionState &current, const ref<Expr> &con
                     abort();
                 }
             }
+
+            std::string constraints_str;
+            llvm::raw_string_ostream rso(constraints_str);
+            current.dumpQuery(rso);
+            klee_warning_once(nullptr, "Executor::fork 16");
+            klee_warning_once(nullptr, "%s", constraints_str.c_str());
+            
             return StatePair(nullptr, &current);
         }
     }
