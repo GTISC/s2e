@@ -15,6 +15,7 @@ RUN cd /home/s2e && git clone https://github.com/GTISC/s2e-env.git \
     && cd /home/s2e/s2e-env && pip install --upgrade pip && pip install .
 
 ENV PATH=$PATH:/home/s2e/.local/bin
+ENV TERM=xterm-256color
 
 # ================
 # First stage: build s2e
