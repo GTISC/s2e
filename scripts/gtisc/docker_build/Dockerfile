@@ -38,7 +38,7 @@ RUN sudo rm -rf build source/.repo source/s2e-linux-kernel source/s2e-env source
 
 # ================
 # Second stage: copy over the built s2e
-FROM base as necessary
+FROM base as deploy
 
 # We need to install two more things to make it work: jq and libmagic1
 # They are probably installed by `s2e build`
@@ -49,7 +49,8 @@ COPY --from=builder /home/s2e/s2e /home/s2e/s2e
 COPY --from=builder /usr/lib/x86_64-linux-gnu/ /usr/lib/x86_64-linux-gnu/
 
 # ================
-# Third stage: flatten everything into one layer to further reduce the size
+# Third stage: flatten everything from deploy into one layer to further reduce the size
 FROM env-base
-COPY --from=necessary / /
+COPY --from=deploy / /
+USER s2e
 WORKDIR /home/s2e
