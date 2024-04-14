@@ -46,7 +46,6 @@ COPY --from=builder /usr/lib/x86_64-linux-gnu/ /usr/lib/x86_64-linux-gnu/
 
 # ================
 # Third stage: flatten everything into one layer to further reduce the size
-FROM scratch
-USER s2e
+FROM base
 COPY --from=necessary / /
 WORKDIR /home/s2e
