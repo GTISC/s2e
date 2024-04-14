@@ -1,9 +1,15 @@
+# ================
+# Image that only sets the envs
+FROM ubuntu:22.04 as env-base
+ENV TZ=Etc/UTC
+ENV PATH=$PATH:/home/s2e/.local/bin
+ENV TERM=xterm-256color
+
+# ================
 # Base image: needed for both building and running
-FROM ubuntu:22.04 as base
+FROM env-base as base
 
 ARG DEBIAN_FRONTEND=noninteractive
-ENV TZ=Etc/UTC
-
 RUN apt update && apt install -y --fix-missing qemu qemu-kvm git curl wget lsb-release sudo gcc python3 python3-dev python3-venv python3-pip python-is-python3
 
 RUN useradd -m s2e && echo "s2e:s2e" | chpasswd && adduser s2e sudo
@@ -14,8 +20,6 @@ USER s2e
 RUN cd /home/s2e && git clone https://github.com/GTISC/s2e-env.git \
     && cd /home/s2e/s2e-env && pip install --upgrade pip && pip install .
 
-ENV PATH=$PATH:/home/s2e/.local/bin
-ENV TERM=xterm-256color
 
 # ================
 # First stage: build s2e
@@ -46,6 +50,6 @@ COPY --from=builder /usr/lib/x86_64-linux-gnu/ /usr/lib/x86_64-linux-gnu/
 
 # ================
 # Third stage: flatten everything into one layer to further reduce the size
-FROM base
+FROM env-base
 COPY --from=necessary / /
 WORKDIR /home/s2e
