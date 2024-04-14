@@ -29,8 +29,7 @@ RUN s2e update
 RUN s2e build
 
 # clean up
-USER root
-RUN rm -rf build source/.repo source/s2e-linux-kernel source/s2e-env source/s2e source/qemu
+RUN sudo rm -rf build source/.repo source/s2e-linux-kernel source/s2e-env source/s2e source/qemu
 
 # ================
 # Second stage: copy over the built s2e
@@ -38,7 +37,7 @@ FROM base as necessary
 
 # We need to install two more things to make it work: jq and libmagic1
 # They are probably installed by `s2e build`
-RUN apt update && apt install -y jq libmagic1
+RUN sudo apt update && sudo apt install -y jq libmagic1
 
 COPY --from=builder /home/s2e/s2e /home/s2e/s2e
 # We also have to copy the libs, otherwise, qemu won't work
