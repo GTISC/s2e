@@ -94,7 +94,9 @@ void FunctionModels::handleStrcmpWidth(S2EExecutionState *state, S2E_LIBCWRAPPER
     uint64_t stringAddrs[2];
     stringAddrs[0] = (uint64_t) cmd.Strcmp.str1;
     stringAddrs[1] = (uint64_t) cmd.Strcmp.str2;
-
+    getWarningsStream(state) << "Handling strcmpwithWidth(" << hexval(cmd.Strcmp.str1) << ", " << hexval(cmd.Strcmp.str2)
+	    		  << ", " << cmd.Strstr.width
+			  << ")\n";
     // Assemble the string compare expression
     if (strcmpWithWidthHelper(state, stringAddrs, retExpr, (uint32_t)(cmd.StrcmpWidth.width))) {
         cmd.needOrigFunc = 0;
@@ -105,9 +107,13 @@ void FunctionModels::handleStrcmpWidth(S2EExecutionState *state, S2E_LIBCWRAPPER
 
 void FunctionModels::handleStrcpy(S2EExecutionState *state, S2E_LIBCWRAPPER_COMMAND &cmd) {
     // Read function arguments
+    getWarningsStream(state) << "Handling strcpy(" << hexval(cmd.Strcpy.dst) << ", " << hexval(cmd.Strcpy.src)
+	    		  << ", " << cmd.Strstr.width
+			  << ")\n";
     uint64_t stringAddrs[2];
     stringAddrs[0] = (uint64_t) cmd.Strcpy.dst;
     stringAddrs[1] = (uint64_t) cmd.Strcpy.src;
+
 
     // Perform the string copy. We don't use the return expression here because it is just a concrete address
     ref<Expr> retExpr;
