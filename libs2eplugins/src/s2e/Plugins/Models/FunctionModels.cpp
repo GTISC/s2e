@@ -92,10 +92,10 @@ void FunctionModels::handleStrncmp(S2EExecutionState *state, S2E_LIBCWRAPPER_COM
 void FunctionModels::handleStrcmpWidth(S2EExecutionState *state, S2E_LIBCWRAPPER_COMMAND &cmd, ref<Expr> &retExpr) {
     // Read function arguments
     uint64_t stringAddrs[2];
-    stringAddrs[0] = (uint64_t) cmd.Strcmp.str1;
-    stringAddrs[1] = (uint64_t) cmd.Strcmp.str2;
-    getWarningsStream(state) << "Handling strcmpwithWidth(" << hexval(cmd.Strcmp.str1) << ", " << hexval(cmd.Strcmp.str2)
-	    		  << ", " << cmd.Strstr.width
+    stringAddrs[0] = (uint64_t) cmd.StrcmpWidth.str1;
+    stringAddrs[1] = (uint64_t) cmd.StrcmpWidth.str2;
+    getWarningsStream(state) << "Handling strcmpwithWidth(" << hexval(cmd.StrcmpWidth.str1) << ", " << hexval(cmd.StrcmpWidth.str2)
+	    		  << ", " << cmd.StrcmpWidth.width
 			  << ")\n";
     // Assemble the string compare expression
     if (strcmpWithWidthHelper(state, stringAddrs, retExpr, (uint32_t)(cmd.StrcmpWidth.width))) {
@@ -108,7 +108,6 @@ void FunctionModels::handleStrcmpWidth(S2EExecutionState *state, S2E_LIBCWRAPPER
 void FunctionModels::handleStrcpy(S2EExecutionState *state, S2E_LIBCWRAPPER_COMMAND &cmd) {
     // Read function arguments
     getWarningsStream(state) << "Handling strcpy(" << hexval(cmd.Strcpy.dst) << ", " << hexval(cmd.Strcpy.src)
-	    		  << ", " << cmd.Strstr.width
 			  << ")\n";
     uint64_t stringAddrs[2];
     stringAddrs[0] = (uint64_t) cmd.Strcpy.dst;
@@ -279,7 +278,7 @@ void FunctionModels::handleCrc(S2EExecutionState *state, S2E_LIBCWRAPPER_COMMAND
 
 void FunctionModels::handleOpcodeInvocation(S2EExecutionState *state, uint64_t guestDataPtr, uint64_t guestDataSize) {
     S2E_LIBCWRAPPER_COMMAND command;
-    getWarningsStream(state) << "Trigger function model " << hexval(command.Command) << "\n";
+    getWarningsStream(state) << "Trigger function model " << hexval(command.Command) << ", " << (int)LIBCWRAPPER_STRCPY << "\n";
 
     if (guestDataSize != sizeof(command)) {
         getWarningsStream(state) << "S2E_LIBCWRAPPER_COMMAND: "
