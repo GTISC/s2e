@@ -6,7 +6,6 @@ on:
   push:
     branches:
       - master
-      - test-func-model
 jobs:
   build:
       runs-on: [self-hosted, ubuntu-129, Linux]
@@ -15,7 +14,6 @@ jobs:
           uses: actions/checkout@v4
         - name: build and push
           env:
-            TARGET_BRANCH: test-func-model
             DOCKER_REGISTRY_USER: ${{ secrets.DOCKER_REGISTRY_USER }}
             DOCKER_REGISTRY_PASS: ${{ secrets.DOCKER_REGISTRY_PASS }}
           run: ./scripts/gtisc/docker_build/build_image_and_push.sh
