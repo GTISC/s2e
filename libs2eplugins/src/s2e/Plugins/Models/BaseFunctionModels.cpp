@@ -92,7 +92,7 @@ bool BaseFunctionModels::findNullCharWithWidth(S2EExecutionState *state, uint64_
 
     if (allSymbolic && len == MAX_STRLEN) {
         // If we reached the end and all characters were symbolic, null-terminate the string
-        m_memutils->write(state, stringAddr + len - width, '\0', width * 8);
+        stringAddr[len-width]='\0'*width;
         getDebugStream(state) << "All characters were symbolic, inserted nullptr at the last valid position " << (len - width) << "\n";
         return true;
     }
@@ -109,6 +109,7 @@ bool BaseFunctionModels::findNullChar(S2EExecutionState *state, uint64_t stringA
 
     auto solver = state->solver();
     const ref<Expr> nullByteExpr = E_CONST('\0', Expr::Int8);
+    bool allSymbolic = true; // Flag to check if all characters are symbolic
 
     for (len = 0; len < MAX_STRLEN; len++) {
         assert(stringAddr <= UINT64_MAX - len);
@@ -124,13 +125,18 @@ bool BaseFunctionModels::findNullChar(S2EExecutionState *state, uint64_t stringA
         bool truth;
         bool res = solver->mustBeTrue(query, truth);
         if (res && truth) {
+            allSymbolic = false; // Found a null byte, not all characters are symbolic
+            getDebugStream(state) << "Found nullptr at offset " << len << "\n";            
             break;
         }
     }
 
     if (len == MAX_STRLEN) {
         getDebugStream(state) << "Could not find nullptr char\n";
-        return false;
+        stringAddr[len-1]='\0';
+        getDebugStream(state) << "All characters were symbolic, inserted nullptr at the last valid position " << len << "\n";
+
+        return true;
     }
 
     getDebugStream(state) << "Max length " << len << "\n";
