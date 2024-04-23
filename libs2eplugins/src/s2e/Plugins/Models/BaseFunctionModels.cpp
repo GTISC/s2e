@@ -83,7 +83,7 @@ bool BaseFunctionModels::findNullCharWithWidth(S2EExecutionState *state, uint64_
         bool truth;
         bool res = solver->mustBeTrue(query, truth);
 
-        if (truth&&res) {
+        if (truth && res) {
             allSymbolic = false; // Found a null byte, not all characters are symbolic
             getDebugStream(state) << "Found nullptr at offset " << len << "\n";
             break;
@@ -96,9 +96,12 @@ bool BaseFunctionModels::findNullCharWithWidth(S2EExecutionState *state, uint64_
         str[len - width] = '\0'; 
         getDebugStream(state) << "All characters were symbolic, inserted nullptr at the last valid position " << (len - width) << "\n";
         return true;
+    }else if(len == MAX_STRLEN){
+        getDebugStream(state) << "failed to find nullptr" << (len - width) << "\n";
+        return false;
     }
-    getDebugStream(state) << "Max length " << len << "\n";
 
+    getDebugStream(state) << "Max length " << len << "\n";
     return true;
 
 }
@@ -132,17 +135,18 @@ bool BaseFunctionModels::findNullChar(S2EExecutionState *state, uint64_t stringA
         }
     }
 
-    if (len == MAX_STRLEN) {
+    if (allSymbolic && len == MAX_STRLEN) {
         getDebugStream(state) << "Could not find nullptr char\n";
         uint8_t *str = reinterpret_cast<uint8_t *>(stringAddr);
         str[len-1]='\0';
         getDebugStream(state) << "All characters were symbolic, inserted nullptr at the last valid position " << len << "\n";
-
         return true;
+    }else if (len == MAX_STRLEN){
+        getDebugStream(state) << "failed to find nullptr" << len << "\n";
+        return false;
     }
 
     getDebugStream(state) << "Max length " << len << "\n";
-
     return true;
 }
 
