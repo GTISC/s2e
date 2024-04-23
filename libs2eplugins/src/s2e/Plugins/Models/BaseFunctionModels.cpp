@@ -92,7 +92,8 @@ bool BaseFunctionModels::findNullCharWithWidth(S2EExecutionState *state, uint64_
 
     if (allSymbolic && len == MAX_STRLEN) {
         // If we reached the end and all characters were symbolic, null-terminate the string
-        stringAddr[len-width]='\0'*width;
+        uint8_t *str = reinterpret_cast<uint8_t *>(stringAddr);
+        str[len - width] = '\0'; 
         getDebugStream(state) << "All characters were symbolic, inserted nullptr at the last valid position " << (len - width) << "\n";
         return true;
     }
@@ -133,7 +134,8 @@ bool BaseFunctionModels::findNullChar(S2EExecutionState *state, uint64_t stringA
 
     if (len == MAX_STRLEN) {
         getDebugStream(state) << "Could not find nullptr char\n";
-        stringAddr[len-1]='\0';
+        uint8_t *str = reinterpret_cast<uint8_t *>(stringAddr);
+        str[len-1]='\0';
         getDebugStream(state) << "All characters were symbolic, inserted nullptr at the last valid position " << len << "\n";
 
         return true;
