@@ -92,7 +92,9 @@ bool BaseFunctionModels::findNullCharWithWidth(S2EExecutionState *state, uint64_
 
     if (allSymbolic && len == MAX_STRLEN) {
         // If we reached the end and all characters were symbolic, null-terminate the string
-        bool success = state->mem()->write(stringAddr + len - width, '\0'*width);
+        std::vector<uint8_t> buffer(width, 0);
+
+        bool success = state->mem()->write(stringAddr + len - width, buffer.data(), width);
         if (!success) {
             getDebugStream(state) << "Failed to write nullptr at the last valid position " << (len - width) << "\n";
             return false;
@@ -140,7 +142,9 @@ bool BaseFunctionModels::findNullChar(S2EExecutionState *state, uint64_t stringA
 
     if (allSymbolic && len == MAX_STRLEN) {
         getDebugStream(state) << "Could not find nullptr char\n";
-        bool success = state->mem()->write(stringAddr + len -1, '\0');
+        std::vector<uint8_t> buffer(1, 0);
+
+        bool success = state->mem()->write(stringAddr + len -1, buffer.data(), 1);
         if (!success) {
             getDebugStream(state) << "Failed to write nullptr at the last valid position " << (len) << "\n";
             return false;
