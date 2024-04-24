@@ -722,14 +722,21 @@ bool BaseFunctionModels::strstrHelper(S2EExecutionState *state, uint64_t haystac
     }
 
     size_t i = 0;  // Position in haystack
+    auto solver = state->solver();
     while (i <= haystackLen - needleLen) {
         uint64_t currentHaystackAddr = haystackAddr + i * byte_width;
         uint64_t strAddrs[2] = {currentHaystackAddr, needleAddr};
         ref<Expr> cmpResult;
 
-        if (strncmpHelper(state, strAddrs, needleLen, cmpResult) && E_EQ(cmpResult, E_CONST(0, Expr::Int32))) {
-            retExpr = E_CONST(currentHaystackAddr, pointerWidth);
-            return true;
+        if (strncmpHelper(state, strAddrs, needleLen, cmpResult)) {
+            // incrementally adding the state constriant based on solver feedback
+            ref<Expr> findNeedle = E_EQ(cmpResult, E_CONST(0, Expr::Int32));
+            Query query(state->constraints(), findNeedle);
+            bool truth;
+            if (solver->mayBeTrue(query,truth)) {
+                retExpr = E_CONST(haystackAddr + i, state->getPointerSize() * CHAR_BIT);
+                return true;
+            }
         }
 
         uint64_t nextCharAddr = currentHaystackAddr + needleLen * byte_width;
