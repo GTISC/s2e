@@ -702,15 +702,15 @@ bool BaseFunctionModels::strstrHelper(S2EExecutionState *state, uint64_t haystac
         return false;
     }
 
-    if (needleLen == 0) {
-        retExpr = E_CONST(haystackAddr, state->getPointerSize() * CHAR_BIT);
-        return true;  // Immediate return if needle is an empty string
-    }
-
     const Expr::Width pointerWidth = state->getPointerSize() * CHAR_BIT;
+
+    if (needleLen == 0) {
+        retExpr = E_CONST(haystackAddr, pointerWidth);
+        return true;  
+    }
     const ref<Expr> nullExpr = E_CONST(0, pointerWidth);
 
-    std::vector<size_t> badCharSkip(256, needleLen);  // Bad character skip array
+    std::vector<size_t> badCharSkip(256, needleLen);  // Bad character skip array. initialized to needleLen for all entry
     uint8_t charByte = 0;  // Temporary variable for reading bytes
     for (size_t i = 0; i < needleLen - 1; ++i) {
         uint64_t readAddr = needleAddr + i * byte_width;
@@ -718,7 +718,7 @@ bool BaseFunctionModels::strstrHelper(S2EExecutionState *state, uint64_t haystac
             getWarningsStream(state) << "Failed to read byte at address " << hexval(readAddr) << "\n";
             return false;
         }
-        badCharSkip[charByte] = needleLen - 1 - i;
+        badCharSkip[charByte] = needleLen - 1 - i; // set each of the needle char to corresponding skip len
     }
 
     size_t i = 0;  // Position in haystack
