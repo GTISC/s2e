@@ -719,6 +719,9 @@ bool BaseFunctionModels::strcatHelper(S2EExecutionState *state, const uint64_t s
 
     return true;
 }
+
+// Implementation using Bad Char Heuristics with Boyer Moore Algorithm. Details can be found here: https://www.topcoder.com/thrive/articles/boyer-moore-algorithm-with-bad-character-heuristic#
+// For Boyer Moore Algorithm, checkout the wiki page: https://en.wikipedia.org/wiki/Boyer–Moore_string-search_algorithm
 bool BaseFunctionModels::strstrHelper(S2EExecutionState *state, uint64_t haystackAddr, uint64_t needleAddr, ref<Expr> &retExpr, uint32_t byte_width) {
     getWarningsStream(state) << "Entering strstrHelper\n";
 
