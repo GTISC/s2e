@@ -739,13 +739,13 @@ bool BaseFunctionModels::strstrHelper(S2EExecutionState *state, uint64_t haystac
 
     std::vector<size_t> badCharSkip(256, needleLen);  // Bad character skip array. initialized to needleLen for all entry
     uint8_t charByte = 0;  // Temporary variable for reading bytes
-    for (size_t i = 0; i < needleLen - 1; ++i) {
+    for (size_t i = 0; i < needleLen - byte_width; i+=byte_width) {
         uint64_t readAddr = needleAddr + i * byte_width;
         if (!state->mem()->read(readAddr, &charByte, VirtualAddress, true)) {
             getWarningsStream(state) << "Failed to read byte at address " << hexval(readAddr) << "\n";
             return false;
         }
-        badCharSkip[charByte] = needleLen - 1 - i; // set each of the needle char to corresponding skip len
+        badCharSkip[charByte] = needleLen - 1*byte_width - i*byte_width; // set each of the needle char to corresponding skip len
     }
 
     size_t i = 0;  // Position in haystack
@@ -769,7 +769,7 @@ bool BaseFunctionModels::strstrHelper(S2EExecutionState *state, uint64_t haystac
         uint64_t nextCharAddr = currentHaystackAddr + needleLen * byte_width;
         if (!state->mem()->read(nextCharAddr, &charByte, VirtualAddress, true)) {
             getWarningsStream(state) << "Failed to read next char at address " << hexval(nextCharAddr) << "\n";
-            continue;  // If fail to read, just continue to try the next character
+            continue;  
         }
         i += badCharSkip[charByte];  // Use the bad character heuristic to skip positions
     }
