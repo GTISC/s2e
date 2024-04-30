@@ -1,0 +1,11 @@
+test:
+    description: "Check if updated nullptr search work properly"
+
+    target_arguments:
+        - ["@@"]
+
+    targets:
+        - windows64-basic12-nullptr-search.exe
+        - windows32-basic12-nullptr-search.exe
+        - linux32-basic12-nullptr-search
+        - linux64-basic12-nullptr-search
