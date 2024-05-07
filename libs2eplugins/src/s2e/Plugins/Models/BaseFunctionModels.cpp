@@ -743,13 +743,13 @@ bool BaseFunctionModels::strstrHelper(S2EExecutionState *state, uint64_t haystac
 
     std::vector<size_t> badCharSkip(256, needleLen);  // Bad character skip array. initialized to needleLen for all entry
     uint8_t charByte = 0; 
-    for (size_t i = 0; i < needleLen - byte_width; i+=byte_width) {
+    for (size_t i = 0; i < byte_width* (needleLen - 1); i+=byte_width) {
         uint64_t readAddr = needleAddr + i * byte_width;
         if (!state->mem()->read(readAddr, &charByte, VirtualAddress, true)) {
             getWarningsStream(state) << "Failed to read byte at address " << hexval(readAddr) << "\n";
             return false;
         }
-        badCharSkip[charByte] = needleLen - byte_width - i*byte_width; // set each of the needle char to corresponding skip len
+        badCharSkip[charByte] = byte_width * (needleLen - 1 - i); // set each of the needle char to corresponding skip len
     }
 
     size_t i = 0;  
@@ -761,7 +761,7 @@ bool BaseFunctionModels::strstrHelper(S2EExecutionState *state, uint64_t haystac
 
         if (strncmpHelper(state, strAddrs, needleLen, cmpResult)) {
             // incrementally adding the state constriant based on solver feedback
-            finalExpr = E_ITE(E_EQ(cmpResult, E_CONST(0, Expr::Int32)), E_CONST(haystackAddr + i, pointerWidth), finalExpr);
+            finalExpr = E_ITE(E_EQ(cmpResult, E_CONST(0, Expr::Int32)), E_CONST(haystackAddr + i* byte_width, pointerWidth), finalExpr);
         }
         
 
