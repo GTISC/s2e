@@ -150,11 +150,10 @@ void FunctionMonitor::onTranslateBlockEnd(ExecutionSignal *signal, S2EExecutionS
 }
 
 static int ends_with(const char *str, const char *suffix) {
-  size_t str_len = strlen(str);
-  size_t suffix_len = strlen(suffix);
+    size_t str_len = strlen(str);
+    size_t suffix_len = strlen(suffix);
 
-  return (str_len >= suffix_len) &&
-         (!memcmp(str + str_len - suffix_len, suffix, suffix_len));
+    return (str_len >= suffix_len) && (!memcmp(str + str_len - suffix_len, suffix, suffix_len));
 }
 
 void FunctionMonitor::onFunctionCall(S2EExecutionState *state, uint64_t callerPc) {
@@ -181,9 +180,10 @@ void FunctionMonitor::onFunctionCall(S2EExecutionState *state, uint64_t callerPc
         getWarningsStream(state) << "Could not get relative caller/callee address\n";
         return;
     }
-    if(callerMod && calleeMod) {
-        if(!ends_with(callerMod->Name.c_str(), ".dll")){
-          getWarningsStream(state) <<  "Caller " << callerMod->Name << ", addr " << hexval(callerPc) << " callee " << calleeMod->Name << ", callee addr: " << hexval(calleePc) << "\n";
+    if (callerMod && calleeMod) {
+        if (!ends_with(callerMod->Name.c_str(), ".dll")) {
+            getWarningsStream(state) << "Caller " << callerMod->Name << ", addr " << hexval(callerPc) << " callee "
+                                     << calleeMod->Name << ", callee addr: " << hexval(calleePc) << "\n";
         }
     }
 

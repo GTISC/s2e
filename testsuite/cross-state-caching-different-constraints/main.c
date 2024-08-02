@@ -31,9 +31,9 @@ static void test_fork_simple(void) {
     // resulting in a total of four states.
     if (!strcmp(buffer, "ABCD")) {
         s2e_printf("This is state %d here", s2e_get_path_id());
-    } else if(strcmp(buffer, "OPQR")) {
+    } else if (strcmp(buffer, "OPQR")) {
         s2e_printf("This is state %d here", s2e_get_path_id());
-    }else{
+    } else {
         exit(0);
     }
 }

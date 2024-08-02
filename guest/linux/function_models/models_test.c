@@ -20,9 +20,9 @@
 /// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 /// SOFTWARE.
 
-#include <string.h>
-#include <stdlib.h>
 #include <assert.h>
+#include <stdlib.h>
+#include <string.h>
 
 #include <s2e/s2e.h>
 
@@ -100,20 +100,20 @@ static void test_strcmp(const char *str1) {
     validate_signs(res1, res2);
 }
 
-//function model testcase for updated null char search
-static void test_null_char_search_using_strcmp(const char* str1){
-    char* str2 = (char*) malloc(4096); 
+// function model testcase for updated null char search
+static void test_null_char_search_using_strcmp(const char *str1) {
+    char *str2 = (char *) malloc(4096);
 
     if (str2 == NULL) {
         printf("Memory allocation failed\n");
         exit(1);
     }
 
-    memset(str2, 'A', 4096);    
+    memset(str2, 'A', 4096);
     s2e_make_symbolic(str2, 4096, "test_string_2");
     int res = strcmp_model(str1, str2);
-    //if we did not set the last char byte to null, the function model will fail on cannot find null char
-    //falling back to original call and concretize the ret 
+    // if we did not set the last char byte to null, the function model will fail on cannot find null char
+    // falling back to original call and concretize the ret
     assert(s2e_is_symbolic(&res, 4));
 }
 
@@ -257,7 +257,7 @@ int main(int argc, char *argv[]) {
         test_memcmp(src, src_length);
     } else if (!strcmp(argv[1], "nullcharsearch")) {
         test_null_char_search_using_strcmp(src);
-    }else if (!strcmp(argv[1], "strlen")) {
+    } else if (!strcmp(argv[1], "strlen")) {
         test_strlen(src);
     } else if (!strcmp(argv[1], "crc32")) {
         test_crc32();

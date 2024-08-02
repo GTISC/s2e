@@ -315,19 +315,17 @@ Executor::StatePair Executor::fork(ExecutionState &current, const ref<Expr> &con
     ref<Expr> evalResult = current.concolics->evaluate(condition);
     ConstantExpr *ce = dyn_cast<ConstantExpr>(evalResult);
     check(ce, "Could not evaluate the expression to a constant.");
-    
+
     bool conditionIsTrue = ce->isTrue();
     if (current.forkDisabled) {
         if (conditionIsTrue) {
-            if (current.addConstraintWhenForkingDisabled && 
-                !current.addConstraint(condition)) {
+            if (current.addConstraintWhenForkingDisabled && !current.addConstraint(condition)) {
                 abort();
             }
             return StatePair(&current, nullptr);
         } else {
-            if (current.addConstraintWhenForkingDisabled && 
-                !current.addConstraint(Expr::createIsZero(condition))) {
-                    abort();
+            if (current.addConstraintWhenForkingDisabled && !current.addConstraint(Expr::createIsZero(condition))) {
+                abort();
             }
             return StatePair(nullptr, &current);
         }
@@ -356,13 +354,13 @@ Executor::StatePair Executor::fork(ExecutionState &current, const ref<Expr> &con
     }
 
     AssignmentPtr concolics = Assignment::create(true);
-    
+
     if (!current.solve(tmpConstraints, *concolics)) {
-        //std::string constraints_str;
-        //llvm::raw_string_ostream rso(constraints_str);
-        //current.dumpQuery(rso);
-        //klee_warning_once(nullptr, "Executor::fork 15");
-        //klee_warning_once(nullptr, "%s", constraints_str.c_str());
+        // std::string constraints_str;
+        // llvm::raw_string_ostream rso(constraints_str);
+        // current.dumpQuery(rso);
+        // klee_warning_once(nullptr, "Executor::fork 15");
+        // klee_warning_once(nullptr, "%s", constraints_str.c_str());
         if (conditionIsTrue) {
             return StatePair(&current, nullptr);
         } else {

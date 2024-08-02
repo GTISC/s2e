@@ -71,7 +71,7 @@ void ConstraintsDumper::initialize() {
         s2e()->getCorePlugin()->onStateFork.connect(sigc::mem_fun(*this, &ConstraintsDumper::onFork));
     }
     output_stream_ = s2e()->openOutputFile(output_file_name_);
-    if(output_stream_ == nullptr) {
+    if (output_stream_ == nullptr) {
         getWarningsStream() << "Cannot open file " << output_file_name_ << " for dumping constraints\n";
         exit(-1);
     }
@@ -79,13 +79,13 @@ void ConstraintsDumper::initialize() {
 }
 
 void ConstraintsDumper::onFork(S2EExecutionState *state, const std::vector<S2EExecutionState *> &newStates,
-                         const std::vector<klee::ref<klee::Expr>> &newConditions) {
+                               const std::vector<klee::ref<klee::Expr>> &newConditions) {
     auto module = m_detector_->getCurrentDescriptor(state);
     if (!module) {
         return;
     }
 
-    for(const auto new_state: newStates) {
+    for (const auto new_state : newStates) {
         *output_stream_ << "State ID: " << new_state->getID() << "\n";
         /*
         for(auto it = new_state->constraints().begin(); it != new_state->constraints().end(); ++it) {

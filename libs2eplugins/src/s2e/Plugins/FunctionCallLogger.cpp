@@ -20,8 +20,8 @@
 /// SOFTWARE.
 ///
 
-#include <s2e/S2E.h>
 #include <s2e/ConfigFile.h>
+#include <s2e/S2E.h>
 
 #include "FunctionCallLogger.h"
 
@@ -39,7 +39,7 @@ namespace {
 //     plgState->...
 // }
 //
-class FunctionCallLoggerState: public PluginState {
+class FunctionCallLoggerState : public PluginState {
     // Declare any methods and fields you need here
 
 public:
@@ -56,7 +56,7 @@ public:
     }
 };
 
-}
+} // namespace
 
 S2E_DEFINE_PLUGIN(FunctionCallLogger, "Describe what the plugin does here", "", );
 
@@ -67,8 +67,8 @@ void FunctionCallLogger::initialize() {
 }
 
 void FunctionCallLogger::onCall(S2EExecutionState *state, const ModuleDescriptorConstPtr &source,
-                     const ModuleDescriptorConstPtr &dest, uint64_t callerPc, uint64_t calleePc,
-                     const FunctionMonitor::ReturnSignalPtr &returnSignal) {
+                                const ModuleDescriptorConstPtr &dest, uint64_t callerPc, uint64_t calleePc,
+                                const FunctionMonitor::ReturnSignalPtr &returnSignal) {
     auto module = m_detector->getCurrentDescriptor(state);
     /*
     if (!module) {
@@ -79,9 +79,8 @@ void FunctionCallLogger::onCall(S2EExecutionState *state, const ModuleDescriptor
     // getDebugStream(state) << "Calling function from: " << hexval(callerPc) << " to " << hexval(calleePc) << "\n";
 }
 
-
-void FunctionCallLogger::handleOpcodeInvocation(S2EExecutionState *state, uint64_t guestDataPtr, uint64_t guestDataSize)
-{
+void FunctionCallLogger::handleOpcodeInvocation(S2EExecutionState *state, uint64_t guestDataPtr,
+                                                uint64_t guestDataSize) {
     S2E_FUNCTIONCALLLOGGER_COMMAND command;
 
     if (guestDataSize != sizeof(command)) {
@@ -103,8 +102,6 @@ void FunctionCallLogger::handleOpcodeInvocation(S2EExecutionState *state, uint64
             break;
     }
 }
-
-
 
 } // namespace plugins
 } // namespace s2e
