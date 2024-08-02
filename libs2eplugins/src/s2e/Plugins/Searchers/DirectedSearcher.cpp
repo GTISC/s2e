@@ -1,16 +1,32 @@
 #include "DirectedSearcher.h"
 
 #include <limits>
+#include <s2e/cpu.h>
 
-using namespace s2e;
-using namespace s2e::plugins;
+#include <s2e/ConfigFile.h>
+#include <s2e/S2E.h>
+#include <s2e/S2EExecutor.h>
+#include <s2e/Utils.h>
 
-DirectedSearcher::DirectedSearcher(S2E *s2e)
-    : Plugin(s2e), m_currentState(nullptr), m_randomEngine(std::random_device()()) {
-}
+#include <iostream>
+
+namespace s2e {
+namespace plugins {
+
+using namespace llvm;
+S2E_DEFINE_PLUGIN(DirectedSearcher, "Searcher to be used for directed symbolic execution", "DirectedSearcher");
+
+// DirectedSearcher::DirectedSearcher(S2E *s2e)
+//     : Plugin(s2e), m_currentState(nullptr), m_randomEngine(std::random_device()()) {
+// }
 
 void DirectedSearcher::initialize() {
     // Any necessary initialization code
+    s2e()->getExecutor()->setSearcher(this);
+    m_currentState = nullptr;
+    m_selector = nullptr;
+
+    m_debug = s2e()->getConfig()->getBool(getConfigKey() + ".debug");
 }
 
 void DirectedSearcher::loadCFG(const std::string &cfgPath) {
@@ -28,10 +44,10 @@ void DirectedSearcher::loadCFG(const std::string &cfgPath) {
 void DirectedSearcher::calculateBranchDistance(S2EExecutionState *state) {
     // Calculate branch distance for the given state
     // This is a placeholder, actual implementation will depend on your method
-    m_branchDistances[state] = 0.0; // Replace with actual branch distance calculation
+    m_branchDistances[state] = 0.0;
 }
 
-S2EExecutionState *DirectedSearcher::selectState() {
+klee::ExecutionState &DirectedSearcher::selectState() {
     // Select the state with the minimum branch distance
     S2EExecutionState *selectedState = nullptr;
     double minDistance = std::numeric_limits<double>::max();
@@ -44,7 +60,7 @@ S2EExecutionState *DirectedSearcher::selectState() {
     }
 
     m_currentState = selectedState;
-    return selectedState;
+    return *m_currentState;
 }
 
 void DirectedSearcher::update(klee::ExecutionState *current, const klee::StateSet &addedStates,
@@ -62,7 +78,7 @@ void DirectedSearcher::update(klee::ExecutionState *current, const klee::StateSe
     }
 }
 
-bool DirectedSearcher::empty() const {
+bool DirectedSearcher::empty() {
     return m_branchDistances.empty();
 }
 
@@ -74,7 +90,36 @@ void DirectedSearcher::setActive(S2EExecutionState *state, bool active) {
         m_branchDistances.erase(state);
     }
 }
+void DirectedSearcher::suspend(S2EExecutionState *state) {
+    if (m_debug) {
+        getDebugStream(nullptr) << "DirectedSearcher: "
+                                << "suspending state " << state->getID() << "\n";
+    }
+
+    if (m_currentState == state) {
+        m_currentState = nullptr;
+    }
+
+    m_activeStates.erase(state);
+    if (m_selector) {
+        m_selector->setActive(state, false);
+    }
+}
+void DirectedSearcher::resume(S2EExecutionState *state) {
+    if (m_debug) {
+        getDebugStream(nullptr) << "DirectedSearcher: "
+                                << "resuming state " << state->getID() << "\n";
+    }
+
+    // m_activeStates.insert(state);
+    // if (m_selector) {
+    //     m_selector->setActive(state, true);
+    // }
+}
 
 void DirectedSearcher::handleOpcodeInvocation(S2EExecutionState *state, uint64_t guestDataPtr, uint64_t guestDataSize) {
     // Implement custom opcode handling if needed
+
 }
+} // namespace plugins
+} // namespace s2e
