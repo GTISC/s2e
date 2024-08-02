@@ -119,7 +119,6 @@ void DirectedSearcher::resume(S2EExecutionState *state) {
 
 void DirectedSearcher::handleOpcodeInvocation(S2EExecutionState *state, uint64_t guestDataPtr, uint64_t guestDataSize) {
     // Implement custom opcode handling if needed
-
 }
 } // namespace plugins
 } // namespace s2e

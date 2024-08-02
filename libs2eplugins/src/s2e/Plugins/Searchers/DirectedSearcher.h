@@ -32,7 +32,7 @@ public:
 
     virtual void setActive(S2EExecutionState *state, bool active) = 0;
 };
-class DirectedSearcher : public Plugin, public klee::Searcher, public IPluginInvoker{
+class DirectedSearcher : public Plugin, public klee::Searcher, public IPluginInvoker {
     S2E_PLUGIN
 public:
     typedef llvm::DenseSet<S2EExecutionState *> States;
@@ -60,10 +60,11 @@ public:
 
     virtual klee::ExecutionState &selectState();
     virtual void update(klee::ExecutionState *current, const klee::StateSet &addedStates,
-                const klee::StateSet &removedStates);
+                        const klee::StateSet &removedStates);
     virtual bool empty();
 
     void setActive(S2EExecutionState *state, bool active);
+
 private:
     void suspend(S2EExecutionState *state);
     void resume(S2EExecutionState *state);

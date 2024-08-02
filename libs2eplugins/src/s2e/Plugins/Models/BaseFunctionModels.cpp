@@ -60,7 +60,8 @@ bool BaseFunctionModels::readArgument(S2EExecutionState *state, unsigned param, 
     return true;
 }
 
-bool BaseFunctionModels::findNullCharWithWidth(S2EExecutionState *state, uint64_t stringAddr, size_t &len, size_t width){
+bool BaseFunctionModels::findNullCharWithWidth(S2EExecutionState *state, uint64_t stringAddr, size_t &len,
+                                               size_t width) {
     assert(stringAddr);
 
     getDebugStream(state) << "Searching for nullptr at " << hexval(stringAddr) << ", " << width << "\n";
@@ -69,7 +70,7 @@ bool BaseFunctionModels::findNullCharWithWidth(S2EExecutionState *state, uint64_
     const ref<Expr> nullByteExpr = E_CONST('\0', width * 8);
     bool allSymbolic = true; // Flag to check if all characters are symbolic
 
-    for (len = 0; len < MAX_STRLEN; len+=width) {
+    for (len = 0; len < MAX_STRLEN; len += width) {
         assert(stringAddr <= UINT64_MAX - len);
         ref<Expr> charExpr = m_memutils->read(state, stringAddr + len, width * 8);
         if (!charExpr) {
@@ -99,16 +100,16 @@ bool BaseFunctionModels::findNullCharWithWidth(S2EExecutionState *state, uint64_
             getDebugStream(state) << "Failed to write nullptr at the last valid position " << (len - width) << "\n";
             return false;
         }
-        getDebugStream(state) << "All characters were symbolic, inserted nullptr at the last valid position " << (len - width) << "\n";
+        getDebugStream(state) << "All characters were symbolic, inserted nullptr at the last valid position "
+                              << (len - width) << "\n";
         return true;
-    }else if(len == MAX_STRLEN){
+    } else if (len == MAX_STRLEN) {
         getDebugStream(state) << "failed to find nullptr" << (len - width) << "\n";
         return false;
     }
 
     getDebugStream(state) << "Max length " << len << "\n";
     return true;
-
 }
 
 bool BaseFunctionModels::findNullChar(S2EExecutionState *state, uint64_t stringAddr, size_t &len) {
@@ -135,7 +136,7 @@ bool BaseFunctionModels::findNullChar(S2EExecutionState *state, uint64_t stringA
         bool res = solver->mustBeTrue(query, truth);
         if (res && truth) {
             allSymbolic = false; // Found a null byte, not all characters are symbolic
-            getDebugStream(state) << "Found nullptr at offset " << len << "\n";            
+            getDebugStream(state) << "Found nullptr at offset " << len << "\n";
             break;
         }
     }
@@ -144,14 +145,15 @@ bool BaseFunctionModels::findNullChar(S2EExecutionState *state, uint64_t stringA
         getDebugStream(state) << "Could not find nullptr char\n";
         std::vector<uint8_t> buffer(1, 0);
 
-        bool success = state->mem()->write(stringAddr + len -1, buffer.data(), 1);
+        bool success = state->mem()->write(stringAddr + len - 1, buffer.data(), 1);
         if (!success) {
             getDebugStream(state) << "Failed to write nullptr at the last valid position " << (len) << "\n";
             return false;
         }
-        getDebugStream(state) << "All characters were symbolic, inserted nullptr at the last valid position " << len << "\n";
+        getDebugStream(state) << "All characters were symbolic, inserted nullptr at the last valid position " << len
+                              << "\n";
         return true;
-    }else if (len == MAX_STRLEN){
+    } else if (len == MAX_STRLEN) {
         getDebugStream(state) << "failed to find nullptr" << len << "\n";
         return false;
     }
@@ -234,7 +236,8 @@ bool BaseFunctionModels::strcmpHelper(S2EExecutionState *state, const uint64_t s
     return strcmpHelperCommon(state, strAddrs, memSize, retExpr);
 }
 
-bool BaseFunctionModels::strcmpWithWidthHelper(S2EExecutionState *state, const uint64_t strAddrs[2], ref<Expr> &retExpr, size_t width) {
+bool BaseFunctionModels::strcmpWithWidthHelper(S2EExecutionState *state, const uint64_t strAddrs[2], ref<Expr> &retExpr,
+                                               size_t width) {
     getDebugStream(state) << "Handling strcmp(" << hexval(strAddrs[0]) << ", " << hexval(strAddrs[1]) << ")\n";
 
     // Calculate the string lengths to determine the maximum
@@ -268,7 +271,8 @@ bool BaseFunctionModels::strncmpHelper(S2EExecutionState *state, const uint64_t 
     return strcmpHelperCommon(state, strAddrs, memSize, retExpr);
 }
 
-bool BaseFunctionModels::strcmpWithWidthHelperCommon(S2EExecutionState *state, const uint64_t strAddrs[2], uint64_t memSize, ref<Expr> &retExpr, size_t width){
+bool BaseFunctionModels::strcmpWithWidthHelperCommon(S2EExecutionState *state, const uint64_t strAddrs[2],
+                                                     uint64_t memSize, ref<Expr> &retExpr, size_t width) {
     getDebugStream(state) << "Comparing " << memSize << " chars\n";
 
     if (!strAddrs[0] || !strAddrs[1]) {
@@ -720,14 +724,18 @@ bool BaseFunctionModels::strcatHelper(S2EExecutionState *state, const uint64_t s
     return true;
 }
 
-// Implementation using Bad Char Heuristics with Boyer Moore Algorithm. Details can be found here: https://www.topcoder.com/thrive/articles/boyer-moore-algorithm-with-bad-character-heuristic#
-// For Boyer Moore Algorithm, checkout the wiki page: https://en.wikipedia.org/wiki/Boyer–Moore_string-search_algorithm
-bool BaseFunctionModels::strstrHelper(S2EExecutionState *state, uint64_t haystackAddr, uint64_t needleAddr, ref<Expr> &retExpr, uint32_t byte_width) {
+// Implementation using Bad Char Heuristics with Boyer Moore Algorithm. Details can be found here:
+// https://www.topcoder.com/thrive/articles/boyer-moore-algorithm-with-bad-character-heuristic# For Boyer Moore
+// Algorithm, checkout the wiki page: https://en.wikipedia.org/wiki/Boyer–Moore_string-search_algorithm
+bool BaseFunctionModels::strstrHelper(S2EExecutionState *state, uint64_t haystackAddr, uint64_t needleAddr,
+                                      ref<Expr> &retExpr, uint32_t byte_width) {
     getWarningsStream(state) << "Entering strstrHelper\n";
 
     size_t haystackLen, needleLen;
-    getInfoStream(state) << "the addr of haystack is " <<hexval(haystackAddr) << " the addr of needle is " << hexval(needleAddr);
-    if (!findNullCharWithWidth(state, haystackAddr, haystackLen, byte_width) || !findNullCharWithWidth(state, needleAddr, needleLen, byte_width)) {
+    getInfoStream(state) << "the addr of haystack is " << hexval(haystackAddr) << " the addr of needle is "
+                         << hexval(needleAddr);
+    if (!findNullCharWithWidth(state, haystackAddr, haystackLen, byte_width) ||
+        !findNullCharWithWidth(state, needleAddr, needleLen, byte_width)) {
         getWarningsStream(state) << "Failed to find nullptr in haystack or needle\n";
         return false;
     }
@@ -736,23 +744,24 @@ bool BaseFunctionModels::strstrHelper(S2EExecutionState *state, uint64_t haystac
 
     if (needleLen == 0) {
         retExpr = E_CONST(haystackAddr, pointerWidth);
-        return true;  
+        return true;
     }
     const ref<Expr> nullExpr = E_CONST(0, pointerWidth);
-    ref<Expr> finalExpr = nullExpr;  
+    ref<Expr> finalExpr = nullExpr;
 
-    std::vector<size_t> badCharSkip(256, needleLen);  // Bad character skip array. initialized to needleLen for all entry
-    uint8_t charByte = 0; 
-    for (size_t i = 0; i < byte_width* (needleLen - 1); i+=byte_width) {
+    std::vector<size_t> badCharSkip(256, needleLen); // Bad character skip array. initialized to needleLen for all entry
+    uint8_t charByte = 0;
+    for (size_t i = 0; i < byte_width * (needleLen - 1); i += byte_width) {
         uint64_t readAddr = needleAddr + i * byte_width;
         if (!state->mem()->read(readAddr, &charByte, VirtualAddress, true)) {
             getWarningsStream(state) << "Failed to read byte at address " << hexval(readAddr) << "\n";
             return false;
         }
-        badCharSkip[charByte] = byte_width * (needleLen - 1 - i); // set each of the needle char to corresponding skip len
+        badCharSkip[charByte] =
+            byte_width * (needleLen - 1 - i); // set each of the needle char to corresponding skip len
     }
 
-    size_t i = 0;  
+    size_t i = 0;
     auto solver = state->solver();
     while (i <= haystackLen - needleLen) {
         uint64_t currentHaystackAddr = haystackAddr + i * byte_width;
@@ -761,24 +770,22 @@ bool BaseFunctionModels::strstrHelper(S2EExecutionState *state, uint64_t haystac
 
         if (strncmpHelper(state, strAddrs, needleLen, cmpResult)) {
             // incrementally adding the state constriant based on solver feedback
-            finalExpr = E_ITE(E_EQ(cmpResult, E_CONST(0, Expr::Int32)), E_CONST(haystackAddr + i* byte_width, pointerWidth), finalExpr);
+            finalExpr = E_ITE(E_EQ(cmpResult, E_CONST(0, Expr::Int32)),
+                              E_CONST(haystackAddr + i * byte_width, pointerWidth), finalExpr);
         }
-        
 
         uint64_t nextCharAddr = currentHaystackAddr + needleLen * byte_width;
         if (!state->mem()->read(nextCharAddr, &charByte, VirtualAddress, true)) {
             getWarningsStream(state) << "Failed to read next char at address " << hexval(nextCharAddr) << "\n";
-            i += byte_width;  // Default skip if unable to read
-            continue;  
+            i += byte_width; // Default skip if unable to read
+            continue;
         }
-        i += badCharSkip[charByte];  // Use the bad character heuristic to skip positions
+        i += badCharSkip[charByte]; // Use the bad character heuristic to skip positions
     }
 
-    retExpr = finalExpr;  // Needle not found
+    retExpr = finalExpr; // Needle not found
     return true;
 }
-
-
 
 } // namespace models
 } // namespace plugins
