@@ -34,10 +34,11 @@ using namespace llvm;
 
 namespace klee {
 
-cl::opt<bool> AddConstraintWhenForkingDisabledDefault("add-constraint-when-forking-disabled",
-                                 cl::desc("Sets whether to (by default) add constraints when forking is disabled. Users can "
-                                          "still switch on/off this at runtime for a state."),
-                                 cl::init(true));
+cl::opt<bool> AddConstraintWhenForkingDisabledDefault(
+    "add-constraint-when-forking-disabled",
+    cl::desc("Sets whether to (by default) add constraints when forking is disabled. Users can "
+             "still switch on/off this at runtime for a state."),
+    cl::init(true));
 
 cl::opt<bool> DebugLogStateMerge("debug-log-state-merge");
 

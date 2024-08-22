@@ -13,8 +13,8 @@
  */
 
 #include <assert.h>
-#include <stdio.h>
 #include <errno.h>
+#include <stdio.h>
 
 #include "qapi/error.h"
 
