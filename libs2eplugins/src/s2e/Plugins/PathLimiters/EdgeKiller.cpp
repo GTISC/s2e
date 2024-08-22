@@ -68,12 +68,13 @@ void EdgeKiller::onEdge(S2EExecutionState *state, uint64_t sourcePc, EdgeType ty
         return;
     }
 
-    std::string s="EdgeKiller: killing the state ";
-    // llvm::raw_string_ostream ss(s);
-    getDebugStream() << "EdgeKiller: killing the state because we found " << hexval(sourcePc) << " => "
+    std::string s;
+    llvm::raw_string_ostream ss(s);
+    ss << "EdgeKiller: killing the state because we found " << hexval(sourcePc) << " => "
        << hexval(state->regs()->getPc()) << "\n";
-    // getDebugStream() << ss;
-    // ss.flush();
+    getWarningsStream(state) << "EdgeKiller: killing the state because we found " << hexval(sourcePc) << " => "
+       << hexval(state->regs()->getPc()) << "\n";
+    ss.flush();
     s2e()->getExecutor()->terminateState(*state, s);
 }
 
