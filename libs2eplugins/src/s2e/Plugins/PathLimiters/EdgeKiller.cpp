@@ -73,7 +73,7 @@ void EdgeKiller::onEdge(S2EExecutionState *state, uint64_t sourcePc, EdgeType ty
     ss << "EdgeKiller: killing the state because we found " << hexval(sourcePc) << " => "
        << hexval(state->regs()->getPc()) << "\n";
     getWarningsStream(state) << "EdgeKiller: killing the state because we found " << hexval(sourcePc) << " => "
-       << hexval(state->regs()->getPc()) << "\n";
+                             << hexval(state->regs()->getPc()) << "\n";
     ss.flush();
     s2e()->getExecutor()->terminateState(*state, s);
 }
