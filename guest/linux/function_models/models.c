@@ -62,7 +62,7 @@ void initialize_models() {
     orig_fprintf = (T_fprintf) dlsym(RTLD_NEXT, "fprintf");
     orig_strcat = (T_strcat) dlsym(RTLD_NEXT, "strcat");
     orig_strncat = (T_strncat) dlsym(RTLD_NEXT, "strncat");
-    orig_strstr= (T_strstr) dlsym(RTLD_NEXT, "strstr");
+    orig_strstr = (T_strstr) dlsym(RTLD_NEXT, "strstr");
 
     orig_crc32 = (T_crc32) dlsym(RTLD_NEXT, "crc32");
     orig_crc16 = (T_crc16) dlsym(RTLD_NEXT, "crc16");
@@ -501,11 +501,9 @@ uint16_t crc16_model(uint16_t crc, const uint8_t *buf, unsigned len) {
     return (*orig_crc16)(crc, buf, len);
 }
 
-char *strstr_model(char *haystack, const char *needle)
-{
+char *strstr_model(char *haystack, const char *needle) {
     // Check whether the address itself is symbolic. If so, function model doesn's support that.
-    if (s2e_is_symbolic(&haystack, sizeof(void *)) || s2e_is_symbolic(&needle, sizeof(void *)))
-    {
+    if (s2e_is_symbolic(&haystack, sizeof(void *)) || s2e_is_symbolic(&needle, sizeof(void *))) {
         // TODO: Disdable forking
         s2e_message("Symbolic address for a string is not supported yet!");
         return (*orig_strstr)(haystack, needle);
@@ -513,28 +511,26 @@ char *strstr_model(char *haystack, const char *needle)
 
     // Quick check for empty strings, as the lib functions assumes pointers are valid.
     // Otherwise the behaviors are undefined. So we are free to return 1.
-    if (!needle)
-    {
-        return (char *)haystack;
+    if (!needle) {
+        return (char *) haystack;
     }
 
     struct S2E_LIBCWRAPPER_COMMAND cmd;
 
     // Struct for executing the symbolic procedures. Just follow the example.
     cmd.Command = LIBCWRAPPER_STRSTR;
-    cmd.Strstr.haystack = (uintptr_t)haystack;
-    cmd.Strstr.needle = (uintptr_t)needle;
+    cmd.Strstr.haystack = (uintptr_t) haystack;
+    cmd.Strstr.needle = (uintptr_t) needle;
     cmd.needOrigFunc = 1;
 
     touch_string(haystack, needle);
 
     s2e_invoke_plugin("FunctionModels", &cmd, sizeof(cmd));
 
-    if (!cmd.needOrigFunc)
-    {
-        return (char *)(cmd.Strstr.ret);
+    if (!cmd.needOrigFunc) {
+        return (char *) (cmd.Strstr.ret);
     }
 
     // Touch here means Function model fails and then we use original function in libc.so
-    return (*orig_strstr)((char*)haystack, needle);
+    return (*orig_strstr)((char *) haystack, needle);
 }

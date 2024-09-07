@@ -29,10 +29,8 @@
 #include <s2e/Plugins/ExecutionMonitors/FunctionMonitor.h>
 #include <s2e/Plugins/OSMonitors/Support/ModuleExecutionDetector.h>
 
-
 namespace s2e {
 namespace plugins {
-
 
 enum S2E_FUNCTIONCALLLOGGER_COMMANDS {
     // TODO: customize list of commands here
@@ -47,8 +45,6 @@ struct S2E_FUNCTIONCALLLOGGER_COMMAND {
     };
 };
 
-
-
 class FunctionCallLogger : public Plugin, public IPluginInvoker {
 
     S2E_PLUGIN
@@ -58,17 +54,14 @@ public:
 
     void initialize();
 
-    void onCall(S2EExecutionState *state, const ModuleDescriptorConstPtr &source,
-                        const ModuleDescriptorConstPtr &dest, uint64_t callerPc, uint64_t calleePc,
-                        const FunctionMonitor::ReturnSignalPtr &returnSignal);
+    void onCall(S2EExecutionState *state, const ModuleDescriptorConstPtr &source, const ModuleDescriptorConstPtr &dest,
+                uint64_t callerPc, uint64_t calleePc, const FunctionMonitor::ReturnSignalPtr &returnSignal);
 
 private:
-
     ModuleExecutionDetector *m_detector;
 
     // Allow the guest to communicate with this plugin using s2e_invoke_plugin
     virtual void handleOpcodeInvocation(S2EExecutionState *state, uint64_t guestDataPtr, uint64_t guestDataSize);
-
 };
 
 } // namespace plugins

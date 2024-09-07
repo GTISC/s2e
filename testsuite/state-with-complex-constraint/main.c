@@ -18,24 +18,23 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
-#include <s2e/s2e.h>
 #include <s2e/function_models/commands.h>
-#include <string.h>
-#include <stdlib.h>
-#include <stdio.h>
+#include <s2e/s2e.h>
 #include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 #include <windows.h>
-
 
 WCHAR needle[] = L"Secret";
 const uint64_t FNV_PRIME = 1099511628211ULL;
 const uint64_t FNV_OFFSET_BASIS = 14695981039346656037ULL;
 
-uint64_t fnv1a_64(const uint64_t* data, size_t length) {
+uint64_t fnv1a_64(const uint64_t *data, size_t length) {
     uint64_t hash = FNV_OFFSET_BASIS;
 
     for (size_t i = 0; i < length; i++) {
-        hash ^= (uint64_t)data[i];
+        hash ^= (uint64_t) data[i];
         hash *= FNV_PRIME;
     }
 
@@ -44,10 +43,10 @@ uint64_t fnv1a_64(const uint64_t* data, size_t length) {
 
 static void test_fork_simple(void) {
     WCHAR haystack[0x10] = {};
-    WCHAR* pp = haystack + 4;
+    WCHAR *pp = haystack + 4;
     s2e_make_symbolic(haystack, sizeof(haystack), "varne0");
-    //char* aa = (char*) a;
-    //s2e_printf("Buffer: %x %x %x %x\n", aa[0], aa[1], aa[2], aa[3]);
+    // char* aa = (char*) a;
+    // s2e_printf("Buffer: %x %x %x %x\n", aa[0], aa[1], aa[2], aa[3]);
     struct S2E_LIBCWRAPPER_COMMAND cmd;
     memset(&cmd, 0, sizeof(cmd));
     /*
@@ -57,14 +56,13 @@ static void test_fork_simple(void) {
     cmd.StrcmpWidth.width = 2;
     */
     cmd.Command = LIBCWRAPPER_STRSTR;
-    cmd.Strstr.haystack = (uintptr_t)haystack;
-    cmd.Strstr.needle = (uintptr_t)needle;
+    cmd.Strstr.haystack = (uintptr_t) haystack;
+    cmd.Strstr.needle = (uintptr_t) needle;
     cmd.Strstr.width = 2;
     cmd.needOrigFunc = 1;
     s2e_invoke_plugin("FunctionModels", &cmd, sizeof(cmd));
-    if (!cmd.needOrigFunc)
-    {
-	/*
+    if (!cmd.needOrigFunc) {
+        /*
         if (cmd.StrcmpWidth.ret)
         {
             s2e_printf("String cmp return 1");
@@ -73,15 +71,12 @@ static void test_fork_simple(void) {
         {
             s2e_printf("String cmp return 0");
         }
-	*/
-	if (cmd.Strstr.ret ==(uint64_t)pp)
-	{
-	    s2e_printf("String strstr return not 0");
-	}
-	else
-	{
-	    s2e_printf("String strstr return 0");
-	}
+        */
+        if (cmd.Strstr.ret == (uint64_t) pp) {
+            s2e_printf("String strstr return not 0");
+        } else {
+            s2e_printf("String strstr return 0");
+        }
     }
 }
 
