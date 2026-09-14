@@ -671,6 +671,32 @@ bool S2EExecutionState::getStaticBranchTargets(uint64_t *truePc, uint64_t *false
     return true;
 }
 
+bool S2EExecutionState::getCurrentStaticBranchTargets(uint64_t *truePc, uint64_t *falsePc) {
+    if (stack.size() == 1 || !truePc || !falsePc) {
+        return false;
+    }
+
+    // Executor::executeInstructions calls stepInstruction before dispatching
+    // the instruction. Consequently onStateForkDecide observes pc at the next
+    // KInstruction and prevPC at the conditional branch being evaluated.
+    const llvm::Instruction *instr = prevPC->inst;
+    const llvm::BranchInst *branch = dyn_cast<llvm::BranchInst>(instr);
+    if (!branch || !branch->isConditional() || branch->getNumSuccessors() != 2) {
+        return false;
+    }
+
+    uint64_t targets[2] = {0, 0};
+    for (unsigned i = 0; i < 2; ++i) {
+        if (!TCGLLVMTranslator::GetStaticBranchTarget(branch->getSuccessor(i), &targets[i])) {
+            return false;
+        }
+    }
+
+    *truePc = targets[0];
+    *falsePc = targets[1];
+    return true;
+}
+
 unsigned S2EExecutionState::getPointerSize() const {
     TranslationBlock *tb = getTb();
     bool is32 = (tb->flags >> HF_CS32_SHIFT) & 1;

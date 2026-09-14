@@ -64,6 +64,12 @@ public:
 
     enum class symbolicAddressReason { MEMORY, PC };
 
+    /// A plugin may leave a symbolic branch unchanged, follow its current
+    /// concolic assignment, or request one feasible outcome without cloning a
+    /// sibling state. Explicit outcomes let target-directed search solve only
+    /// the constraint that advances its objective.
+    enum class StateForkPreference { NONE, FOLLOW_CURRENT, FORCE_TRUE, FORCE_FALSE };
+
     void initialize();
 
     // clang-format off
@@ -376,6 +382,21 @@ public:
                  const klee::ref<klee::Expr>& /*condition*/,
                  bool& /* allow forking */>
         onStateForkDecide;
+
+
+    ///
+    /// \brief Select one outcome of an otherwise permitted symbolic fork.
+    ///
+    /// This signal is emitted after onStateForkDecide. A resource or safety
+    /// plugin veto therefore takes precedence. NONE preserves normal forking;
+    /// FOLLOW_CURRENT has the legacy no-fork behavior; FORCE_TRUE/FORCE_FALSE
+    /// solve the requested outcome and do not create the opposite state.
+    ///
+    sigc::signal<void,
+                 S2EExecutionState*,
+                 const klee::ref<klee::Expr>& /*condition*/,
+                 StateForkPreference& /* preference */>
+        onStateForkSelect;
 
 
     ///

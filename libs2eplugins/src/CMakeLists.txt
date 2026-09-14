@@ -92,6 +92,7 @@ add_library(
 
     # Searchers
     s2e/Plugins/Searchers/MultiSearcher.cpp
+    s2e/Plugins/Searchers/BehaviorSearcher.cpp
     s2e/Plugins/Searchers/CooperativeSearcher.cpp
     s2e/Plugins/Searchers/MergingSearcher.cpp
     s2e/Plugins/Searchers/LoopExitSearcher.cpp
@@ -127,6 +128,7 @@ add_library(
     s2e/Plugins/Analyzers/CacheSim.cpp
     s2e/Plugins/Analyzers/AddressTracker.cpp
     s2e/Plugins/Analyzers/CFIChecker.cpp
+    s2e/Plugins/Analyzers/ExecutableRegionMonitor.cpp
     s2e/Plugins/Analyzers/Tickler.cpp
 
 
