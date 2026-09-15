@@ -36,6 +36,7 @@ class ExecutableRegionMonitor : public Plugin, public IPluginInvoker {
     uint64_t m_maxRegions = 1024;
     uint64_t m_maxChildDepth = 4;
     uint64_t m_maxChildren = 64;
+    uint64_t m_nextAllocationId = 1;
 
     void onMonitorLoad(S2EExecutionState *state);
     void onTranslateBlockStart(ExecutionSignal *signal, S2EExecutionState *state, TranslationBlock *tb, uint64_t pc);
@@ -56,6 +57,8 @@ public:
     void initialize();
     unsigned behaviorStage(S2EExecutionState *state, BehaviorGoal goal);
     bool isTrackedDynamicCode(S2EExecutionState *state, uint64_t pc);
+    bool getDynamicCodeLocation(S2EExecutionState *state, uint64_t pc, uint64_t &pid,
+                                uint64_t &allocation, uint64_t &offset);
     virtual void handleOpcodeInvocation(S2EExecutionState *state, uint64_t guestDataPtr, uint64_t guestDataSize);
 };
 

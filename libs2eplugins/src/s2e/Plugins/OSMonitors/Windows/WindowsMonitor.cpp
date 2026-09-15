@@ -75,10 +75,10 @@ private:
     HandlesMap m_handles;
     ProcessPids m_pids;
 
-    uint64_t m_cachedPid;
-    uint64_t m_cachedTid;
-    uint64_t m_cachedEthread;
-    uint64_t m_cachedEprocess;
+    uint64_t m_cachedPid = (uint64_t) -1;
+    uint64_t m_cachedTid = (uint64_t) -1;
+    uint64_t m_cachedEthread = 0;
+    uint64_t m_cachedEprocess = 0;
 
 public:
     void addProcessHandle(uint64_t ownerPid, uint64_t handle, uint64_t targetPid) {
@@ -623,6 +623,24 @@ void WindowsMonitor::onSyscallInt(S2EExecutionState *state, uint64_t pc) {
 /* Do the translation to actual syscall here */
 void WindowsMonitor::processSyscall(S2EExecutionState *state, uint64_t pc, uint64_t syscallId, uint64_t stack) {
     onSyscall.emit(state, pc, syscallId, stack);
+}
+
+uint64_t WindowsMonitor::getPid(S2EExecutionState *state) {
+    if (state == m_cachedState) {
+        return getCurrentProcessId(state);
+    }
+    DECLARE_PLUGINSTATE(WindowsMonitorState, state);
+    assert(plgState->m_cachedPid != (uint64_t) -1);
+    return plgState->m_cachedPid;
+}
+
+uint64_t WindowsMonitor::getTid(S2EExecutionState *state) {
+    if (state == m_cachedState) {
+        return getCurrentThreadId(state);
+    }
+    DECLARE_PLUGINSTATE(WindowsMonitorState, state);
+    assert(plgState->m_cachedTid != (uint64_t) -1);
+    return plgState->m_cachedTid;
 }
 
 void WindowsMonitor::onStateSwitch(S2EExecutionState *currentState, S2EExecutionState *nextState) {

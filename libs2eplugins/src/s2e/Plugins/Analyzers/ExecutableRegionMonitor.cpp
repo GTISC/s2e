@@ -47,6 +47,8 @@ struct ExecutableRegionCommand {
 };
 
 struct ExecutableRegion {
+    uint64_t allocationId = 0;
+    uint64_t budgetBase = 0;
     uint64_t pid = 0;
     uint64_t sourcePid = 0;
     uint64_t start = 0;
@@ -141,16 +143,27 @@ unsigned ExecutableRegionMonitor::behaviorStage(S2EExecutionState *state, Behavi
 }
 
 bool ExecutableRegionMonitor::isTrackedDynamicCode(S2EExecutionState *state, uint64_t pc) {
+    uint64_t pid, allocation, offset;
+    return getDynamicCodeLocation(state, pc, pid, allocation, offset);
+}
+
+bool ExecutableRegionMonitor::getDynamicCodeLocation(S2EExecutionState *state, uint64_t pc, uint64_t &pid,
+                                                     uint64_t &allocation, uint64_t &offset) {
     DECLARE_PLUGINSTATE(ExecutableRegionMonitorState, state);
-    const uint64_t pid = m_windows->getCurrentProcessId(state);
+    pid = m_windows->getCurrentProcessId(state);
     if (m_requireInstrumentationReady && !isTrustedThread(plgState, pid, m_windows->getCurrentThreadId(state))) {
         return false;
     }
     if (m_modules->getModule(state, pid, pc))
         return false;
-    return std::any_of(plgState->regions.begin(), plgState->regions.end(), [&](const ExecutableRegion &region) {
-        return region.executed && region.pid == pid && region.start <= pc && pc < region.end;
-    });
+    for (const auto &region : plgState->regions) {
+        if (region.executed && region.pid == pid && region.start <= pc && pc < region.end) {
+            allocation = region.allocationId;
+            offset = pc - region.budgetBase;
+            return true;
+        }
+    }
+    return false;
 }
 
 void ExecutableRegionMonitor::initialize() {
@@ -310,6 +323,8 @@ void ExecutableRegionMonitor::onNtAllocateVirtualMemory(S2EExecutionState *state
     uint64_t end = exclusiveEnd(start, data.Size);
 
     ExecutableRegion region;
+    region.allocationId = m_nextAllocationId++;
+    region.budgetBase = start;
     region.pid = pid;
     region.sourcePid = sourcePid;
     region.start = start;
@@ -329,6 +344,12 @@ void ExecutableRegionMonitor::onNtAllocateVirtualMemory(S2EExecutionState *state
         }
         region.start = std::min(region.start, it->start);
         region.end = std::max(region.end, it->end);
+        // Reserve/commit overlap is the same lifetime, not a fresh budget.
+        // Keep the origin stable even when the tracked interval expands.
+        if (it->allocationId < region.allocationId) {
+            region.allocationId = it->allocationId;
+            region.budgetBase = it->budgetBase;
+        }
         region.everWritable = region.everWritable || it->everWritable;
         region.executed = region.executed || it->executed;
         region.dumped = region.dumped || it->dumped;

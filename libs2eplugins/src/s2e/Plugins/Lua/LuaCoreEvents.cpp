@@ -43,6 +43,14 @@ void LuaCoreEvents::initialize() {
         exit(-1);
     }
     m_maxDynamicForks = maximum;
+    auto siteLimit = s2e()->getConfig()->getInt(getConfigKey() + ".maxDynamicForksPerSite", 1);
+    auto loopLimit = s2e()->getConfig()->getInt(getConfigKey() + ".maxDynamicLoopForks", 2);
+    if (siteLimit < 1 || siteLimit > 128 || loopLimit < 0 || loopLimit > 128) {
+        getWarningsStream() << "dynamic site limit must be in 1..128 and loop limit in 0..128\n";
+        exit(-1);
+    }
+    m_maxDynamicForksPerSite = siteLimit;
+    m_maxDynamicLoopForks = loopLimit;
     if (m_maxDynamicForks) {
         m_regionMonitor = s2e()->getPlugin<ExecutableRegionMonitor>();
         if (!m_regionMonitor) {
@@ -101,14 +109,19 @@ void LuaCoreEvents::onStateForkDecide(S2EExecutionState *state, const klee::ref<
     bool luaAllows = lua_toboolean(L, -1) != 0;
     lua_pop(L, 1);
 
-    uint64_t a, b;
-    if (!luaAllows && allowForking && m_regionMonitor && m_dynamicForksGranted < m_maxDynamicForks &&
+    uint64_t a, b, pid, allocation, offset;
+    const auto pc = state->regs()->getPc();
+    if (!luaAllows && allowForking && m_regionMonitor && m_dynamicBudget.total() < m_maxDynamicForks &&
         state->getCurrentStaticBranchTargets(&a, &b) &&
-        m_regionMonitor->isTrackedDynamicCode(state, state->regs()->getPc())) {
-        luaAllows = true;
-        ++m_dynamicForksGranted;
-        getInfoStream(state) << "trusted dynamic fork granted " << m_dynamicForksGranted << "/" << m_maxDynamicForks
-                             << " at " << hexval(state->regs()->getPc()) << "\n";
+        m_regionMonitor->getDynamicCodeLocation(state, pc, pid, allocation, offset)) {
+        const bool backedge = a <= pc || b <= pc;
+        if (m_dynamicBudget.grant(pid, allocation, offset, backedge, m_maxDynamicForks,
+                                  m_maxDynamicForksPerSite, m_maxDynamicLoopForks)) {
+            luaAllows = true;
+            getInfoStream(state) << "trusted dynamic fork granted " << m_dynamicBudget.total() << "/" << m_maxDynamicForks
+                                 << " at " << hexval(pc) << " allocation=" << allocation
+                                 << " backedge=" << backedge << "\n";
+        }
     }
     // A Lua allow decision must not clear an earlier resource/safety veto.
     allowForking = allowForking && luaAllows;

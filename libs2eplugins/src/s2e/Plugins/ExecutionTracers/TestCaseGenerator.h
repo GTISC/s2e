@@ -25,6 +25,7 @@
 #define S2E_PLUGINS_TCGEN_H
 
 #include <string>
+#include <chrono>
 #include <unordered_map>
 #include <vector>
 
@@ -246,6 +247,13 @@ public:
 
 private:
     sigc::connection m_stateForkConnection;
+    sigc::connection m_deadlineConnection;
+    sigc::connection m_deadlineTranslateConnection;
+    uint64_t m_terminateAfterSeconds = 0;
+    std::chrono::steady_clock::time_point m_started;
+    void onDeadline();
+    void onDeadlineTranslate(ExecutionSignal *signal, S2EExecutionState *state, TranslationBlock *tb, uint64_t pc);
+    void onDeadlineExecute(S2EExecutionState *state, uint64_t pc);
     sigc::connection m_stateKillConnection;
     sigc::connection m_linuxSegFaultConnection;
     sigc::connection m_windowsUserCrashConnection;

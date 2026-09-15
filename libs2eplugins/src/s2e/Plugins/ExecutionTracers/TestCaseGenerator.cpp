@@ -104,7 +104,53 @@ TestCaseGenerator::TestCaseGenerator(S2E *s2e) : Plugin(s2e) {
 
 void TestCaseGenerator::initialize() {
     m_tracer = s2e()->getPlugin<ExecutionTracer>();
+    auto deadline = s2e()->getConfig()->getInt(getConfigKey() + ".terminateAfterSeconds", 0);
+    if (deadline < 0 || deadline > 86400) {
+        getWarningsStream() << "terminateAfterSeconds must be in 0..86400\n";
+        exit(-1);
+    }
+    m_terminateAfterSeconds = deadline;
+    m_started = std::chrono::steady_clock::now();
+    if (deadline) {
+        m_deadlineConnection = s2e()->getCorePlugin()->onTimer.connect(
+            sigc::mem_fun(*this, &TestCaseGenerator::onDeadline));
+    }
     enable();
+}
+
+void TestCaseGenerator::onDeadline() {
+    if (std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - m_started).count() <
+        static_cast<int64_t>(m_terminateAfterSeconds)) {
+        return;
+    }
+    m_deadlineConnection.disconnect();
+    // QEMU's timer dispatcher cannot catch CpuExitException. Arm a callback
+    // only after expiry and flush safely before the next TB fetch, so normal
+    // execution pays no per-block deadline instrumentation cost.
+    m_deadlineTranslateConnection = s2e()->getCorePlugin()->onTranslateBlockStart.connect(
+        sigc::mem_fun(*this, &TestCaseGenerator::onDeadlineTranslate));
+    se_tb_safe_flush();
+}
+
+void TestCaseGenerator::onDeadlineTranslate(ExecutionSignal *signal, S2EExecutionState *state,
+                                            TranslationBlock *tb, uint64_t pc) {
+    signal->connect(sigc::mem_fun(*this, &TestCaseGenerator::onDeadlineExecute));
+}
+
+void TestCaseGenerator::onDeadlineExecute(S2EExecutionState *state, uint64_t pc) {
+    m_deadlineTranslateConnection.disconnect();
+    auto executor = s2e()->getExecutor();
+    const auto states = executor->getStates();
+    // Killing the active state throws CpuExitException. Kill it last so every
+    // sibling emits its final testcase and coverage before the engine exits.
+    for (auto state : states) {
+        if (state != g_s2e_state && !executor->getRemovedStates().count(state)) {
+            executor->terminateState(*state, "analysis deadline (testcases flushed)");
+        }
+    }
+    if (states.count(g_s2e_state) && !executor->getRemovedStates().count(g_s2e_state)) {
+        executor->terminateState(*g_s2e_state, "analysis deadline (testcases flushed)");
+    }
 }
 
 void TestCaseGenerator::enable() {
@@ -174,7 +220,7 @@ void TestCaseGenerator::onStateFork(S2EExecutionState *state, const std::vector<
                                     const std::vector<klee::ref<klee::Expr>> &newConditions) {
     for (auto *newState : newStates) {
         if (newState != state)
-            generateTestCases(newState, "fork", TC_FILE);
+            generateTestCases(newState, "fork", TC_TRACE | TC_FILE);
     }
 }
 

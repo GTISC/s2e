@@ -448,13 +448,9 @@ public:
         return m_cachedTid;
     }
 
-    uint64_t getPid(S2EExecutionState *state) {
-        return getCurrentProcessId(state);
-    }
-
-    uint64_t getTid(S2EExecutionState *state) {
-        return getCurrentThreadId(state);
-    }
+    // Trace generation also queries inactive fork children and killed siblings.
+    uint64_t getPid(S2EExecutionState *state);
+    uint64_t getTid(S2EExecutionState *state);
 
     uint64_t getKernelStart() const {
         assert(m_initialized);
