@@ -5,6 +5,7 @@
 #include "ExecutableRegionMonitor.h"
 
 #include <s2e/ConfigFile.h>
+#include <s2e/Plugins/ExecutionTracers/TestCaseGenerator.h>
 #include <s2e/S2E.h>
 #include <s2e/S2EExecutionState.h>
 #include <s2e/Utils.h>
@@ -162,6 +163,12 @@ void ExecutableRegionMonitor::recordChild(S2EExecutionState *state, const char *
     out.close();
     if (!out) {
         getWarningsStream(state) << "ExecutableRegionMonitor: could not persist child evidence\n";
+    } else if (!child.diagnostic) {
+        auto controller = s2e()->getPlugin<testcases::TestCaseGenerator>();
+        if (controller && std::string(event) == "activated-injected")
+            controller->explorationProgress(state, pid, child.depth, "injected_execution", true);
+        else if (controller && std::string(event) == "activated-image")
+            controller->explorationProgress(state, pid, child.depth, "child_activation", false);
     }
 }
 
@@ -318,6 +325,8 @@ void ExecutableRegionMonitor::handleOpcodeInvocation(S2EExecutionState *state, u
     // that predate this boundary, including EasyHook's loader, stay untrusted.
     plgState->readyPids.insert(request.pid);
     plgState->trustedThreads[request.pid].insert(request.tid);
+    auto controller = s2e()->getPlugin<testcases::TestCaseGenerator>();
+    if (controller) controller->explorationReady(state, request.pid);
     getInfoStream(state) << "ExecutableRegionMonitor: instrumentationReady sourcePid="
                          << hexval(m_windows->getCurrentProcessId(state))
                          << " sourceTid=" << hexval(m_windows->getCurrentThreadId(state))

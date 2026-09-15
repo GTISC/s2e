@@ -104,6 +104,35 @@ TestCaseGenerator::TestCaseGenerator(S2E *s2e) : Plugin(s2e) {
 
 void TestCaseGenerator::initialize() {
     m_tracer = s2e()->getPlugin<ExecutionTracer>();
+    auto cfg = s2e()->getConfig();
+    const auto prefix = getConfigKey() + ".explorationBudget.";
+    m_budgetMode = cfg->getString(prefix + "mode", "off");
+    if (m_budgetMode != "off" && m_budgetMode != "shadow" && m_budgetMode != "extend") {
+        getWarningsStream() << "explorationBudget.mode must be off, shadow or extend\n";
+        exit(-1);
+    }
+    if (m_budgetMode != "off") {
+        auto read = [&](const char *key, uint64_t fallback) {
+            auto value = cfg->getInt(prefix + key, fallback);
+            if (value < 1 || value > 7200) {
+                getWarningsStream() << "invalid exploration budget " << key << "\n";
+                exit(-1);
+            }
+            return static_cast<uint64_t>(value);
+        };
+        m_explorationBudget.initial = read("initialSeconds", 300);
+        m_explorationBudget.maximum = read("maxSeconds", 1800);
+        m_explorationBudget.extension = read("extensionSeconds", 180);
+        m_explorationBudget.window = read("progressWindowSeconds", 90);
+        m_explorationBudget.minimum = read("minRuntimeSeconds", 120);
+        m_budgetStartupSeconds = read("startupSeconds", 120);
+        if (m_explorationBudget.minimum > m_explorationBudget.initial ||
+            m_explorationBudget.initial > m_explorationBudget.maximum) {
+            getWarningsStream() << "exploration budget requires minimum <= initial <= maximum\n";
+            exit(-1);
+        }
+        m_explorationBudget.soft = m_explorationBudget.initial;
+    }
     auto deadline = s2e()->getConfig()->getInt(getConfigKey() + ".terminateAfterSeconds", 0);
     if (deadline < 0 || deadline > 86400) {
         getWarningsStream() << "terminateAfterSeconds must be in 0..86400\n";
@@ -111,17 +140,87 @@ void TestCaseGenerator::initialize() {
     }
     m_terminateAfterSeconds = deadline;
     m_started = std::chrono::steady_clock::now();
-    if (deadline) {
+    if (deadline || m_budgetMode != "off") {
         m_deadlineConnection = s2e()->getCorePlugin()->onTimer.connect(
             sigc::mem_fun(*this, &TestCaseGenerator::onDeadline));
     }
     enable();
 }
 
+uint64_t TestCaseGenerator::budgetElapsed() const {
+    if (!m_explorationBudget.ready) return 0;
+    return std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - m_budgetStarted).count();
+}
+
+void TestCaseGenerator::budgetJournal(const char *event, S2EExecutionState *state, uint64_t pid,
+                                      uint64_t depth, const std::string &key, bool strong) {
+    std::ofstream out(s2e()->getOutputFilename("exploration-budget.jsonl"), std::ios::app);
+    out << "{\"schema\":1,\"instance\":" << s2e()->getCurrentInstanceIndex()
+        << ",\"time_ns\":" << std::chrono::duration_cast<std::chrono::nanoseconds>(
+               std::chrono::steady_clock::now().time_since_epoch()).count()
+        << ",\"mode\":\"" << m_budgetMode << "\",\"event\":\"" << event
+        << "\",\"elapsed_s\":" << budgetElapsed() << ",\"soft_deadline_s\":" << m_explorationBudget.soft
+        << ",\"hard_deadline_s\":" << m_explorationBudget.maximum
+        << ",\"state\":" << (state ? state->getID() : 0) << ",\"pid\":" << pid << ",\"depth\":" << depth
+        << ",\"key\":\"" << key << "\",\"strong\":" << (strong ? "true" : "false")
+        << ",\"novelty_count\":" << m_explorationBudget.seen.size()
+        << ",\"early_stop_enforced\":false,\"coverage_complete\":false}\n";
+    out.close();
+    if (!out) getWarningsStream(state) << "Could not persist exploration budget journal\n";
+}
+
+void TestCaseGenerator::explorationReady(S2EExecutionState *state, uint64_t pid) {
+    if (m_budgetMode == "off" || m_explorationBudget.ready) return;
+    m_budgetStarted = std::chrono::steady_clock::now();
+    m_explorationBudget.start();
+    budgetJournal("ready", state, pid);
+}
+
+void TestCaseGenerator::explorationProgress(S2EExecutionState *state, uint64_t pid, uint64_t depth,
+                                            const std::string &kind, bool strong) {
+    if (m_budgetMode == "off") return;
+    static const std::set<std::string> allowed = {"child_activation", "injected_execution", "file_write",
+        "registry_write", "autorun_configuration", "shell_service_configuration"};
+    if (!allowed.count(kind)) return;
+    const auto key = budgetKey(kind, depth);
+    if (m_explorationBudget.progress(budgetElapsed(), key, strong)) {
+        budgetJournal("progress", state, pid, depth, key, strong);
+        if (m_explorationBudget.firstStop != UINT64_MAX)
+            budgetJournal("progress_after_stop_recommendation", state, pid, depth, key, strong);
+    }
+}
+
 void TestCaseGenerator::onDeadline() {
-    if (std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - m_started).count() <
-        static_cast<int64_t>(m_terminateAfterSeconds)) {
-        return;
+    if (m_budgetMode != "off") {
+        const auto elapsed = budgetElapsed();
+        if (!m_explorationBudget.ready) {
+            if (std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - m_started).count() <
+                static_cast<int64_t>(m_budgetStartupSeconds)) return;
+            budgetJournal("startup_timeout");
+            m_deadlineReason = "exploration startup deadline (testcases flushed)";
+        } else {
+            if (elapsed >= m_budgetLastHeartbeat + 30) {
+                m_budgetLastHeartbeat = elapsed;
+                budgetJournal("heartbeat");
+            }
+            if (m_explorationBudget.quiet(elapsed)) budgetJournal("would_stop_early_unknown_coverage");
+            auto decision = m_explorationBudget.tick(elapsed);
+            if (decision == ExplorationBudget::Extend) {
+                budgetJournal(m_budgetMode == "shadow" ? "would_extend" : "extended");
+                return;
+            }
+            if (decision == ExplorationBudget::SoftStop) {
+                budgetJournal(m_budgetMode == "shadow" ? "would_stop_soft" : "stop_soft");
+                if (m_budgetMode == "shadow") return;
+                m_deadlineReason = "exploration soft deadline (testcases flushed)";
+            } else if (decision == ExplorationBudget::HardStop) {
+                budgetJournal("stop_hard");
+                m_deadlineReason = "exploration hard deadline (testcases flushed)";
+            } else return;
+        }
+    } else {
+        if (std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - m_started).count() <
+            static_cast<int64_t>(m_terminateAfterSeconds)) return;
     }
     m_deadlineConnection.disconnect();
     // QEMU's timer dispatcher cannot catch CpuExitException. Arm a callback
@@ -145,11 +244,11 @@ void TestCaseGenerator::onDeadlineExecute(S2EExecutionState *state, uint64_t pc)
     // sibling emits its final testcase and coverage before the engine exits.
     for (auto state : states) {
         if (state != g_s2e_state && !executor->getRemovedStates().count(state)) {
-            executor->terminateState(*state, "analysis deadline (testcases flushed)");
+            executor->terminateState(*state, m_deadlineReason);
         }
     }
     if (states.count(g_s2e_state) && !executor->getRemovedStates().count(g_s2e_state)) {
-        executor->terminateState(*g_s2e_state, "analysis deadline (testcases flushed)");
+        executor->terminateState(*g_s2e_state, m_deadlineReason);
     }
 }
 

@@ -21,11 +21,14 @@
 ///
 
 #include <chrono>
+#include <algorithm>
+#include <cctype>
 #include <fstream>
 #include <klee/Expr.h>
 #include <s2e/ConfigFile.h>
 #include <s2e/Plugins/Analyzers/ExecutableRegionMonitor.h>
 #include <s2e/Plugins/Core/Vmi.h>
+#include <s2e/Plugins/ExecutionTracers/TestCaseGenerator.h>
 #include <s2e/S2E.h>
 #include <s2e/cpu.h>
 #include <tuple>
@@ -282,6 +285,25 @@ void FunctionCallLogger::onReturn(S2EExecutionState *state, const ModuleDescript
     out.close();
     if (!out)
         getWarningsStream(state) << "Could not persist Windows effect evidence\n";
+    // Credit only persisted native observations, never guest log messages.
+    // Generic writes are weak evidence; a concrete autorun configuration is
+    // a semantic milestone, not proof that persistence actually executed.
+    auto controller = s2e()->getPlugin<testcases::TestCaseGenerator>();
+    if (!out || diagnostic || !controller) return;
+    std::string path = call.path;
+    std::transform(path.begin(), path.end(), path.begin(), [](unsigned char c) { return std::tolower(c); });
+    if (path.find("\\windows\\wer\\") != std::string::npos ||
+        path.find("inventoryapplicationfile") != std::string::npos) return;
+    controller->explorationProgress(state, pid, depth, registry ? "registry_write" : "file_write", false);
+    if (registry && !call.data.empty() && (call.args[3] == 1 || call.args[3] == 2)) {
+        for (const auto *root : {"hkey_current_user", "hkey_local_machine"}) {
+            for (const auto *view : {"\\software\\", "\\software\\wow6432node\\"}) {
+                const std::string prefix = std::string(root) + view + "microsoft\\windows\\currentversion\\";
+                if (path == prefix + "run" || path == prefix + "runonce")
+                    controller->explorationProgress(state, pid, depth, "autorun_configuration", true);
+            }
+        }
+    }
 }
 
 void FunctionCallLogger::handleOpcodeInvocation(S2EExecutionState *state, uint64_t guestDataPtr,
