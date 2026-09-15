@@ -67,6 +67,7 @@ struct DescendantProcess {
 
 class ExecutableRegionMonitorState : public PluginState {
 public:
+    BehaviorOracle oracle;
     std::vector<ExecutableRegion> regions;
     std::set<uint64_t> armedPids;
     std::set<uint64_t> readyPids;
@@ -133,6 +134,11 @@ static bool isTrustedThread(const ExecutableRegionMonitorState *state, uint64_t 
 }
 
 } // namespace
+
+unsigned ExecutableRegionMonitor::behaviorStage(S2EExecutionState *state, BehaviorGoal goal) {
+    DECLARE_PLUGINSTATE(ExecutableRegionMonitorState, state);
+    return plgState->oracle.stage(goal);
+}
 
 void ExecutableRegionMonitor::initialize() {
     m_windows = dynamic_cast<WindowsMonitor *>(s2e()->getPlugin("OSMonitor"));
@@ -322,6 +328,7 @@ void ExecutableRegionMonitor::onNtAllocateVirtualMemory(S2EExecutionState *state
                                  << "\n";
     }
     plgState->regions.push_back(region);
+    plgState->oracle.allocated(sourcePid, pid, start, end, m_maxRegions);
 
     getInfoStream(state) << "ExecutableRegionMonitor: effect=" << (remote ? "VirtualAllocEx" : "VirtualAlloc")
                          << " native=NtAllocateVirtualMemory sourcePid=" << hexval(sourcePid) << " pid=" << hexval(pid)
@@ -403,6 +410,7 @@ void ExecutableRegionMonitor::onNtFreeVirtualMemory(S2EExecutionState *state, co
     if (m_requireInstrumentationReady && !isTrustedThread(plgState, sourcePid, m_windows->getCurrentThreadId(state))) {
         return;
     }
+    plgState->oracle.freed(pid, data.BaseAddress, data.Size ? end : data.BaseAddress);
     plgState->regions.erase(std::remove_if(plgState->regions.begin(), plgState->regions.end(),
                                            [&](const ExecutableRegion &region) {
                                                if (region.pid != pid) {
@@ -500,6 +508,32 @@ void ExecutableRegionMonitor::onBlockExecute(S2EExecutionState *state, uint64_t 
                          << " size=" << hexval(it->end - it->start) << " protection=" << hexval(it->protection)
                          << " remote=" << it->remote << "\n";
 
+    const unsigned previousStages[] = {plgState->oracle.stage(BehaviorGoal::AllocatedCodeExecution),
+                                       plgState->oracle.stage(BehaviorGoal::ChildRemoteExecution)};
+    plgState->oracle.executed(it->sourcePid, pid, pc);
+    unsigned goalIndex = 0;
+    for (auto goal : {BehaviorGoal::AllocatedCodeExecution, BehaviorGoal::ChildRemoteExecution}) {
+        if (previousStages[goalIndex++] != behaviorGoalStages(goal) &&
+            plgState->oracle.stage(goal) == behaviorGoalStages(goal)) {
+            getInfoStream(state) << "BehaviorOracle: completed=" << behaviorGoalName(goal)
+                                 << " state=" << state->getID() << " sourcePid=" << hexval(it->sourcePid)
+                                 << " pid=" << hexval(pid) << " base=" << hexval(it->start) << " pc=" << hexval(pc)
+                                 << "\n";
+            // A native-only journal is the acceptance authority. Guest log
+            // messages can contain arbitrary strings, including fake oracle
+            // lines, and must never certify a completion contract.
+            std::ofstream witness(s2e()->getOutputFilename("behavior-witnesses.jsonl"), std::ios::app);
+            witness << "{\"schema\":1,\"goal\":\"" << behaviorGoalName(goal)
+                    << "\",\"instance\":" << s2e()->getCurrentInstanceIndex() << ",\"state\":" << state->getID()
+                    << ",\"source_pid\":" << it->sourcePid << ",\"pid\":" << pid << ",\"base\":" << it->start
+                    << ",\"end\":" << it->end << ",\"pc\":" << pc << "}\n";
+            witness.flush();
+            if (!witness) {
+                getWarningsStream(state) << "BehaviorOracle: could not persist completion witness\n";
+            }
+        }
+    }
+
     if (!m_dumpOnExecute || !m_maxDumpBytes || it->dumped) {
         return;
     }
@@ -595,6 +629,7 @@ void ExecutableRegionMonitor::onProcessLoad(S2EExecutionState *state, uint64_t p
     child.depth = depth;
     child.imageName = lowerCase(imageName);
     plgState->descendants[pid] = child;
+    plgState->oracle.childCreated(parentPid, pid);
     plgState->armedPids.erase(pid);
 
     // Keeping the PID in ProcessExecutionDetector ensures the analysis does
@@ -608,6 +643,7 @@ void ExecutableRegionMonitor::onProcessLoad(S2EExecutionState *state, uint64_t p
 void ExecutableRegionMonitor::onProcessUnload(S2EExecutionState *state, uint64_t pageDir, uint64_t pid,
                                               uint64_t returnCode) {
     DECLARE_PLUGINSTATE(ExecutableRegionMonitorState, state);
+    plgState->oracle.processExited(pid);
     plgState->regions.erase(std::remove_if(plgState->regions.begin(), plgState->regions.end(),
                                            [&](const ExecutableRegion &region) { return region.pid == pid; }),
                             plgState->regions.end());

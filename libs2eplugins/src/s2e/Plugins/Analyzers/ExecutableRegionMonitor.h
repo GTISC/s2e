@@ -5,6 +5,8 @@
 #ifndef S2E_PLUGINS_EXECUTABLEREGIONMONITOR_H
 #define S2E_PLUGINS_EXECUTABLEREGIONMONITOR_H
 
+#include "BehaviorOracle.h"
+
 #include <s2e/CorePlugin.h>
 #include <s2e/Plugin.h>
 #include <s2e/Plugins/Core/BaseInstructions.h>
@@ -52,6 +54,7 @@ public:
     }
 
     void initialize();
+    unsigned behaviorStage(S2EExecutionState *state, BehaviorGoal goal);
     virtual void handleOpcodeInvocation(S2EExecutionState *state, uint64_t guestDataPtr, uint64_t guestDataSize);
 };
 
