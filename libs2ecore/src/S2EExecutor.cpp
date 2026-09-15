@@ -1369,6 +1369,7 @@ S2EExecutor::StatePair S2EExecutor::doFork(ExecutionState &current, const klee::
     // 2. If the condition is constant, there is no need to do anything
     //    as the fork will not branch.
     bool forkOk = true;
+    CorePlugin::StateForkPreference forkPreference = CorePlugin::StateForkPreference::NONE;
     if (!condition || !dyn_cast<klee::ConstantExpr>(condition)) {
         if (currentState->forkDisabled) {
             g_s2e->getDebugStream(currentState) << "fork disabled at " << hexval(currentState->regs()->getPc()) << "\n";
@@ -1377,7 +1378,32 @@ S2EExecutor::StatePair S2EExecutor::doFork(ExecutionState &current, const klee::
         g_s2e->getCorePlugin()->onStateForkDecide.emit(currentState, condition, forkOk);
         if (!forkOk) {
             g_s2e->getDebugStream(currentState) << "fork prevented by request from plugin\n";
+        } else if (condition && !currentState->forkDisabled) {
+            g_s2e->getCorePlugin()->onStateForkSelect.emit(currentState, condition, forkPreference);
         }
+    }
+
+    if (condition && (forkPreference == CorePlugin::StateForkPreference::FORCE_TRUE ||
+                      forkPreference == CorePlugin::StateForkPreference::FORCE_FALSE)) {
+        const bool takeTrue = forkPreference == CorePlugin::StateForkPreference::FORCE_TRUE;
+        const klee::ref<klee::Expr> selected = takeTrue ? condition : klee::NotExpr::create(condition);
+        // Recompute the concolic assignment only for the outcome selected by
+        // objective guidance. If an incomplete CFG requested an infeasible
+        // side, leave the state untouched and fall back to KLEE's normal fork.
+        if (currentState->addConstraint(selected, true)) {
+            g_s2e->getDebugStream(currentState)
+                << "fork selected " << (takeTrue ? "true" : "false") << " outcome by plugin at "
+                << hexval(currentState->regs()->getPc()) << "\n";
+            return takeTrue ? StatePair(&current, nullptr) : StatePair(nullptr, &current);
+        }
+        g_s2e->getWarningsStream(currentState)
+            << "could not satisfy plugin-selected fork outcome at " << hexval(currentState->regs()->getPc())
+            << "; falling back to normal forking\n";
+        forkPreference = CorePlugin::StateForkPreference::NONE;
+    }
+
+    if (forkPreference == CorePlugin::StateForkPreference::FOLLOW_CURRENT) {
+        forkOk = false;
     }
 
     bool oldForkStatus = currentState->forkDisabled;

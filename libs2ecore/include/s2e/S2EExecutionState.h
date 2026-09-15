@@ -406,6 +406,11 @@ public:
     bool disassemble(llvm::raw_ostream &os, uint64_t pc, unsigned size, unsigned pointerSize);
 
     bool getStaticBranchTargets(uint64_t *truePc, uint64_t *falsePc);
+    /// Return the two native-PC branch destinations while the conditional
+    /// branch itself is current. Unlike getStaticBranchTargets, this is safe
+    /// to call from CorePlugin::onStateForkDecide, before KLEE creates either
+    /// successor state.
+    bool getCurrentStaticBranchTargets(uint64_t *truePc, uint64_t *falsePc);
     bool getStaticTarget(uint64_t *target);
 
     void enumPossibleRanges(klee::ref<klee::Expr> e, klee::ref<klee::Expr> start, klee::ref<klee::Expr> end,
