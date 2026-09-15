@@ -98,7 +98,8 @@ add_library(
     s2e/Plugins/Searchers/CUPASearcher.cpp
     s2e/Plugins/Searchers/SeedSearcher.cpp
     s2e/Plugins/Searchers/SeedScheduler.cpp
-
+    s2e/Plugins/Searchers/DirectedSearcher.cpp
+    
     # Function models
     s2e/Plugins/Models/BaseFunctionModels.cpp
     s2e/Plugins/Models/FunctionModels.cpp
