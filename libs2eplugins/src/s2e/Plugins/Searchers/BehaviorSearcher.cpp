@@ -212,6 +212,7 @@ void BehaviorSearcher::initialize() {
         sigc::mem_fun(*this, &BehaviorSearcher::onInitializationComplete));
     s2e()->getCorePlugin()->onStateFork.connect(sigc::mem_fun(*this, &BehaviorSearcher::onStateFork));
     s2e()->getCorePlugin()->onStateForkSelect.connect(sigc::mem_fun(*this, &BehaviorSearcher::onStateForkSelect));
+    s2e()->getCorePlugin()->onStateForkDecide.connect(sigc::mem_fun(*this, &BehaviorSearcher::onStateForkObserve));
     s2e()->getCorePlugin()->onStateSwitch.connect(sigc::mem_fun(*this, &BehaviorSearcher::onStateSwitch));
     s2e()->getCorePlugin()->onTimer.connect(sigc::mem_fun(*this, &BehaviorSearcher::onTimer));
     s2e()->getCorePlugin()->onEngineShutdown.connect(sigc::mem_fun(*this, &BehaviorSearcher::onEngineShutdown));
@@ -361,21 +362,32 @@ void BehaviorSearcher::profileBranch(S2EExecutionState *state, uint64_t pc, cons
     output << "]}\n";
 }
 
-void BehaviorSearcher::onStateForkSelect(S2EExecutionState *state, const klee::ref<klee::Expr> &condition,
-                                         CorePlugin::StateForkPreference &preference) {
-    if (preference != CorePlugin::StateForkPreference::NONE || !condition) {
+void BehaviorSearcher::onStateForkObserve(S2EExecutionState *state, const klee::ref<klee::Expr> &condition,
+                                          bool &allowForking) {
+    // Observation must not disappear when another plugin vetoes a fork, and
+    // must never modify that veto. Decisions remain in onStateForkSelect.
+    if (!m_profileBranches || !condition) {
         return;
     }
+    uint64_t a, b;
+    if (!state->getCurrentStaticBranchTargets(&a, &b))
+        return;
+    auto module = m_detector->getCurrentDescriptor(state);
+    if (module && module->Name == m_moduleName) {
+        uint64_t nativePc;
+        if (module->ToNativeBase(state->regs()->getPc(), nativePc))
+            profileBranch(state, nativePc, condition);
+    } else if (m_regionMonitor && m_regionMonitor->isTrackedDynamicCode(state, state->regs()->getPc())) {
+        profileBranch(state, state->regs()->getPc(), condition, true);
+    }
+}
 
+void BehaviorSearcher::onStateForkSelect(S2EExecutionState *state, const klee::ref<klee::Expr> &condition,
+                                         CorePlugin::StateForkPreference &preference) {
+    if (preference != CorePlugin::StateForkPreference::NONE || !condition)
+        return;
     auto module = m_detector->getCurrentDescriptor(state);
     if (!module || module->Name != m_moduleName) {
-        if (m_profileBranches && m_regionMonitor &&
-            m_regionMonitor->isTrackedDynamicCode(state, state->regs()->getPc())) {
-            uint64_t a, b;
-            if (state->getCurrentStaticBranchTargets(&a, &b)) {
-                profileBranch(state, state->regs()->getPc(), condition, true);
-            }
-        }
         return;
     }
 
@@ -391,8 +403,6 @@ void BehaviorSearcher::onStateForkSelect(S2EExecutionState *state, const klee::r
     if (!module->ToNativeBase(state->regs()->getPc(), nativeSource)) {
         return;
     }
-    if (m_profileBranches)
-        profileBranch(state, nativeSource, condition);
     // An absent CFG is unknown, not a proof of branch irrelevance.
     if (!m_forkGateEnabled || m_distances.empty())
         return;

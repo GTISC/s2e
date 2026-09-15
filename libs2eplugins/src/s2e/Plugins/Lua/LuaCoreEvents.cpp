@@ -26,6 +26,7 @@
 #include <s2e/S2EExecutor.h>
 #include <s2e/Utils.h>
 
+#include <s2e/Plugins/Analyzers/ExecutableRegionMonitor.h>
 #include "LuaCoreEvents.h"
 #include "LuaInstrumentationState.h"
 #include "LuaS2EExecutionState.h"
@@ -36,6 +37,19 @@ namespace plugins {
 S2E_DEFINE_PLUGIN(LuaCoreEvents, "Exposes core events to lua scripts", "", "LuaBindings");
 
 void LuaCoreEvents::initialize() {
+    auto maximum = s2e()->getConfig()->getInt(getConfigKey() + ".maxDynamicForks", 0);
+    if (maximum < 0 || maximum > 128) {
+        getWarningsStream() << "maxDynamicForks must be in 0..128\n";
+        exit(-1);
+    }
+    m_maxDynamicForks = maximum;
+    if (m_maxDynamicForks) {
+        m_regionMonitor = s2e()->getPlugin<ExecutableRegionMonitor>();
+        if (!m_regionMonitor) {
+            getWarningsStream() << "maxDynamicForks requires ExecutableRegionMonitor\n";
+            exit(-1);
+        }
+    }
     getInfoStream() << "Registering instrumentation for core signals\n";
     registerCoreSignals(getConfigKey());
 }
@@ -84,8 +98,20 @@ void LuaCoreEvents::onStateForkDecide(S2EExecutionState *state, const klee::ref<
     Lunar<LuaInstrumentationState>::push(L, &luaInstrumentation);
 
     lua_call(L, 2, 1);
-    allowForking = lua_toboolean(L, -1) != 0;
+    bool luaAllows = lua_toboolean(L, -1) != 0;
     lua_pop(L, 1);
+
+    uint64_t a, b;
+    if (!luaAllows && allowForking && m_regionMonitor && m_dynamicForksGranted < m_maxDynamicForks &&
+        state->getCurrentStaticBranchTargets(&a, &b) &&
+        m_regionMonitor->isTrackedDynamicCode(state, state->regs()->getPc())) {
+        luaAllows = true;
+        ++m_dynamicForksGranted;
+        getInfoStream(state) << "trusted dynamic fork granted " << m_dynamicForksGranted << "/" << m_maxDynamicForks
+                             << " at " << hexval(state->regs()->getPc()) << "\n";
+    }
+    // A Lua allow decision must not clear an earlier resource/safety veto.
+    allowForking = allowForking && luaAllows;
 
     if (!allowForking) {
         s2e()->getDebugStream() << "instrumentation prevented forking at pc=" << hexval(state->regs()->getPc()) << "\n";

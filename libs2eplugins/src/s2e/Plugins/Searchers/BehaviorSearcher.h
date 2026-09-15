@@ -126,6 +126,7 @@ private:
                      const std::vector<klee::ref<klee::Expr>> &newConditions);
     void onStateForkSelect(S2EExecutionState *state, const klee::ref<klee::Expr> &condition,
                            CorePlugin::StateForkPreference &preference);
+    void onStateForkObserve(S2EExecutionState *state, const klee::ref<klee::Expr> &condition, bool &allowForking);
     void onNewBlockCovered(S2EExecutionState *state);
     void onStateSwitch(S2EExecutionState *current, S2EExecutionState *next);
     void onTimer();
