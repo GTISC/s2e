@@ -92,7 +92,7 @@ public:
 
         llvm::DenseSet<uint64_t> toErase;
         auto end = stackBottom + stackSize;
-        for (const auto &it : m_signals) {
+        for (const auto &it : sit->second) {
             if (it.first >= stackBottom && it.first < end) {
                 toErase.insert(it.first);
             }
@@ -143,7 +143,9 @@ void FunctionMonitor::onTranslateBlockEnd(ExecutionSignal *signal, S2EExecutionS
     }
 
     if (tb->se_tb_type == TB_CALL || tb->se_tb_type == TB_CALL_IND) {
-        signal->connect(sigc::mem_fun(*this, &FunctionMonitor::onFunctionCall));
+        signal->connect(sigc::bind(sigc::mem_fun(*this, &FunctionMonitor::onFunctionCall), false));
+    } else if (tb->se_tb_type == TB_JMP_IND && !onTailCall.empty()) {
+        signal->connect(sigc::bind(sigc::mem_fun(*this, &FunctionMonitor::onFunctionCall), true));
     } else if (tb->se_tb_type == TB_RET) {
         signal->connect(sigc::mem_fun(*this, &FunctionMonitor::onFunctionReturn));
     }
@@ -156,7 +158,7 @@ static int ends_with(const char *str, const char *suffix) {
     return (str_len >= suffix_len) && (!memcmp(str + str_len - suffix_len, suffix, suffix_len));
 }
 
-void FunctionMonitor::onFunctionCall(S2EExecutionState *state, uint64_t callerPc) {
+void FunctionMonitor::onFunctionCall(S2EExecutionState *state, uint64_t callerPc, bool tailCall) {
     if (!m_processDetector->isTracked(state)) {
         return;
     }
@@ -165,6 +167,9 @@ void FunctionMonitor::onFunctionCall(S2EExecutionState *state, uint64_t callerPc
 
     auto callerMod = m_map->getModule(state, callerPc);
     auto calleeMod = m_map->getModule(state, calleePc);
+    if (tailCall && (!calleeMod || callerMod == calleeMod)) {
+        return;
+    }
 
     bool ok = true;
 
@@ -189,11 +194,19 @@ void FunctionMonitor::onFunctionCall(S2EExecutionState *state, uint64_t callerPc
 
     auto onRetSig = new FunctionMonitor::ReturnSignal();
     auto onRetSigPtr = std::shared_ptr<FunctionMonitor::ReturnSignal>(onRetSig);
-    onCall.emit(state, callerMod, calleeMod, callerPc, calleePc, onRetSigPtr);
+    (tailCall ? onTailCall : onCall).emit(state, callerMod, calleeMod, callerPc, calleePc, onRetSigPtr);
     if (!onRetSigPtr->empty()) {
         DECLARE_PLUGINSTATE(FunctionMonitorState, state);
         auto pid = m_monitor->getPid(state);
-        plgState->setReturnSignal(pid, state->regs()->getSp(), onRetSigPtr);
+        auto sp = state->regs()->getSp() + onRetSigPtr->stackCleanup;
+        auto previous = plgState->getReturnSignal(pid, sp);
+        if (tailCall && previous) {
+            // DLL export forwarders share the application's return slot. Do
+            // not replace its callback with a library-internal one. Preserving
+            // the outer call also avoids unbounded listener chains on tail loops.
+            return;
+        }
+        plgState->setReturnSignal(pid, sp, onRetSigPtr);
     }
 }
 

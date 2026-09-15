@@ -18,6 +18,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <chrono>
 #include <cstdint>
 #include <fstream>
 #include <limits>
@@ -62,9 +63,12 @@ struct ExecutableRegion {
 };
 
 struct DescendantProcess {
+    uint64_t lifetime = 0;
+    uint64_t parentLifetime = 0;
     uint64_t parentPid = 0;
     uint64_t depth = 0;
     std::string imageName;
+    bool diagnostic = false;
 };
 
 class ExecutableRegionMonitorState : public PluginState {
@@ -137,9 +141,52 @@ static bool isTrustedThread(const ExecutableRegionMonitorState *state, uint64_t 
 
 } // namespace
 
+void ExecutableRegionMonitor::recordChild(S2EExecutionState *state, const char *event, uint64_t pid, uint64_t pc) {
+    DECLARE_PLUGINSTATE(ExecutableRegionMonitorState, state);
+    const auto &child = plgState->descendants.at(pid);
+    // Hex encodes arbitrary image-name bytes without trusting them as JSON syntax.
+    std::string encoded;
+    for (unsigned char c : child.imageName) {
+        encoded += "0123456789abcdef"[c >> 4];
+        encoded += "0123456789abcdef"[c & 15];
+    }
+    std::ofstream out(s2e()->getOutputFilename("child-processes.jsonl"), std::ios::app);
+    out << "{\"schema\":1,\"event\":\"" << event << "\",\"instance\":" << s2e()->getCurrentInstanceIndex()
+        << ",\"time_ns\":"
+        << std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch())
+               .count()
+        << ",\"state\":" << state->getID() << ",\"pid\":" << pid << ",\"lifetime\":" << child.lifetime
+        << ",\"parent_pid\":" << child.parentPid << ",\"parent_lifetime\":" << child.parentLifetime
+        << ",\"depth\":" << child.depth << ",\"image_hex\":\"" << encoded << "\",\"pc\":" << pc
+        << ",\"diagnostic_lineage\":" << (child.diagnostic ? "true" : "false") << "}\n";
+    out.close();
+    if (!out) {
+        getWarningsStream(state) << "ExecutableRegionMonitor: could not persist child evidence\n";
+    }
+}
+
 unsigned ExecutableRegionMonitor::behaviorStage(S2EExecutionState *state, BehaviorGoal goal) {
     DECLARE_PLUGINSTATE(ExecutableRegionMonitorState, state);
     return plgState->oracle.stage(goal);
+}
+
+bool ExecutableRegionMonitor::getProcessContext(S2EExecutionState *state, uint64_t &pid, uint64_t &lifetime,
+                                                uint64_t &depth, bool &diagnostic) {
+    DECLARE_PLUGINSTATE(ExecutableRegionMonitorState, state);
+    pid = m_windows->getCurrentProcessId(state);
+    if (!plgState->armedPids.count(pid) ||
+        (m_requireInstrumentationReady && !isTrustedThread(plgState, pid, m_windows->getCurrentThreadId(state)))) {
+        return false;
+    }
+    lifetime = depth = 0;
+    diagnostic = false;
+    auto child = plgState->descendants.find(pid);
+    if (child != plgState->descendants.end()) {
+        lifetime = child->second.lifetime;
+        depth = child->second.depth;
+        diagnostic = child->second.diagnostic;
+    }
+    return true;
 }
 
 bool ExecutableRegionMonitor::isTrackedDynamicCode(S2EExecutionState *state, uint64_t pc) {
@@ -490,6 +537,7 @@ void ExecutableRegionMonitor::onBlockExecute(S2EExecutionState *state, uint64_t 
             }
             plgState->armedPids.insert(pid);
             plgState->trustedThreads[pid].insert(m_windows->getCurrentThreadId(state));
+            recordChild(state, injectedExecution ? "activated-injected" : "activated-image", pid, pc);
             getInfoStream(state) << "ExecutableRegionMonitor: childActivated parentPid="
                                  << hexval(descendant->second.parentPid) << " pid=" << hexval(pid)
                                  << " image=" << descendant->second.imageName << " depth=" << descendant->second.depth
@@ -659,10 +707,18 @@ void ExecutableRegionMonitor::onProcessLoad(S2EExecutionState *state, uint64_t p
     }
 
     DescendantProcess child;
+    child.lifetime = m_nextProcessId++;
     child.parentPid = parentPid;
     child.depth = depth;
     child.imageName = lowerCase(imageName);
+    child.diagnostic =
+        child.imageName == "werfault.exe" || child.imageName == "wermgr.exe" || child.imageName == "drvctl.exe";
+    if (parent != plgState->descendants.end()) {
+        child.parentLifetime = parent->second.lifetime;
+        child.diagnostic |= parent->second.diagnostic;
+    }
     plgState->descendants[pid] = child;
+    recordChild(state, "created", pid);
     plgState->oracle.childCreated(parentPid, pid);
     plgState->armedPids.erase(pid);
 
@@ -677,6 +733,9 @@ void ExecutableRegionMonitor::onProcessLoad(S2EExecutionState *state, uint64_t p
 void ExecutableRegionMonitor::onProcessUnload(S2EExecutionState *state, uint64_t pageDir, uint64_t pid,
                                               uint64_t returnCode) {
     DECLARE_PLUGINSTATE(ExecutableRegionMonitorState, state);
+    if (plgState->descendants.count(pid)) {
+        recordChild(state, "exited", pid);
+    }
     plgState->oracle.processExited(pid);
     plgState->regions.erase(std::remove_if(plgState->regions.begin(), plgState->regions.end(),
                                            [&](const ExecutableRegion &region) { return region.pid == pid; }),

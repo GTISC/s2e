@@ -25,12 +25,24 @@
 
 #include <s2e/Plugin.h>
 
+#include <map>
 #include <s2e/Plugins/Core/BaseInstructions.h>
 #include <s2e/Plugins/ExecutionMonitors/FunctionMonitor.h>
 #include <s2e/Plugins/OSMonitors/Support/ModuleExecutionDetector.h>
+#include <string>
 
 namespace s2e {
 namespace plugins {
+
+class ExecutableRegionMonitor;
+class Vmi;
+struct ObservedWindowsCall {
+    std::string api, path, value, data;
+    uint64_t pid = 0, lifetime = 0, depth = 0;
+    uint32_t args[9] = {};
+    bool diagnostic = false;
+    bool recordEffect = false;
+};
 
 enum S2E_FUNCTIONCALLLOGGER_COMMANDS {
     // TODO: customize list of commands here
@@ -59,6 +71,13 @@ public:
 
 private:
     ModuleExecutionDetector *m_detector;
+    ExecutableRegionMonitor *m_regions = nullptr;
+    Vmi *m_vmi = nullptr;
+    bool m_observeWindowsEffects = false;
+    std::map<std::string, std::map<uint64_t, std::string>> m_exports;
+    void onReturn(S2EExecutionState *state, const ModuleDescriptorConstPtr &source,
+                  const ModuleDescriptorConstPtr &dest, uint64_t pc, ObservedWindowsCall call);
+    void onProcessUnload(S2EExecutionState *state, uint64_t addressSpace, uint64_t pid, uint64_t returnCode);
 
     // Allow the guest to communicate with this plugin using s2e_invoke_plugin
     virtual void handleOpcodeInvocation(S2EExecutionState *state, uint64_t guestDataPtr, uint64_t guestDataSize);
