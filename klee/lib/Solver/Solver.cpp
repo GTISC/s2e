@@ -303,38 +303,6 @@ public:
 };
 
 bool ValidatingSolver::computeTruth(const Query &query, bool &isValid) {
-#define VOTING_SOLVER
-#define VOTE_COUNT 3
-#if defined(VOTING_SOLVER)
-    bool results[VOTE_COUNT];
-    unsigned trueCount = 0, falseCount = 0;
-
-    for (unsigned i = 0; i < VOTE_COUNT; ++i) {
-        bool res1, res2;
-        if (!oracle->impl->computeTruth(query, res1))
-            return false;
-
-        if (!solver->impl->computeTruth(query, res2))
-            return false;
-
-        if (res1 == res2)
-            results[i] = res1;
-        else
-            results[i] = rand() & 1 ? res1 : res2;
-
-        if (results[i])
-            ++trueCount;
-        else
-            ++falseCount;
-    }
-
-    if (trueCount > falseCount) {
-        isValid = true;
-    } else {
-        isValid = false;
-    }
-    return true;
-#else
     bool answer;
 
     if (!solver->impl->computeTruth(query, isValid))
@@ -346,56 +314,9 @@ bool ValidatingSolver::computeTruth(const Query &query, bool &isValid) {
         pabort("invalid solver result (computeTruth)");
 
     return true;
-#endif
 }
 
 bool ValidatingSolver::computeValidity(const Query &query, Validity &result) {
-#if defined(VOTING_SOLVER)
-    Validity results[VOTE_COUNT];
-    unsigned trueCount = 0, falseCount = 0, unknownCount = 0;
-    for (unsigned i = 0; i < VOTE_COUNT; ++i) {
-        Validity res1, res2;
-        if (!solver->impl->computeValidity(query, res1))
-            return false;
-
-        if (!oracle->impl->computeValidity(query, res2))
-            return false;
-
-        if (res1 == res2)
-            results[i] = res1;
-        else
-            results[i] = res1;
-
-        switch (results[i]) {
-            case Validity::True:
-                ++trueCount;
-                break;
-            case Validity::False:
-                ++falseCount;
-                break;
-            case Validity::Unknown:
-                ++unknownCount;
-                break;
-            default:
-                abort();
-        }
-    }
-    if (trueCount > falseCount && falseCount >= unknownCount)
-        result = Validity::True;
-    else if (trueCount > unknownCount && unknownCount >= falseCount)
-        result = Validity::True;
-    else if (falseCount > trueCount && trueCount >= unknownCount)
-        result = Validity::False;
-    else if (falseCount > unknownCount && unknownCount >= trueCount)
-        result = Validity::False;
-    else if (unknownCount > falseCount && falseCount >= trueCount)
-        result = Validity::Unknown;
-    else if (unknownCount > trueCount && trueCount >= falseCount)
-        result = Validity::Unknown;
-    else
-        abort();
-    return true;
-#else
     Validity answer;
 
     if (!solver->impl->computeValidity(query, result))
@@ -407,7 +328,6 @@ bool ValidatingSolver::computeValidity(const Query &query, Validity &result) {
         pabort("invalid solver result (computeValidity)");
 
     return true;
-#endif
 }
 
 bool ValidatingSolver::computeValue(const Query &query, ref<Expr> &result) {

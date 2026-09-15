@@ -28,6 +28,7 @@
 #include <s2e/CorePlugin.h>
 #include <s2e/Plugin.h>
 #include <s2e/S2EExecutionState.h>
+#include "SparseSymbolicPolicy.h"
 
 namespace s2e {
 namespace plugins {
@@ -69,6 +70,7 @@ public:
 
 private:
     OSMonitor *m_monitor;
+    SparseSymbolicPolicy m_sparsePolicy;
 
     void onMonitorLoad(S2EExecutionState *state);
     void onTranslateBlockStart(ExecutionSignal *signal, S2EExecutionState *state, TranslationBlock *tb, uint64_t pc);

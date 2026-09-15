@@ -74,6 +74,8 @@ private:
     double m_epsilon = 0.0;
     double m_plateauEpsilon = 0.0;
     bool m_forkGateEnabled = false;
+    bool m_profileBranches = false;
+    unsigned m_branchProfiles = 0;
     double m_unknownForkProbability = 0.0;
     double m_irrelevantForkProbability = 0.0;
     uint64_t m_distanceSlack = 1;
@@ -128,6 +130,8 @@ private:
     void onStateSwitch(S2EExecutionState *current, S2EExecutionState *next);
     void onTimer();
     void logStats();
+    void profileBranch(S2EExecutionState *state, uint64_t pc, const klee::ref<klee::Expr> &condition,
+                       bool dynamic = false);
     void onEngineShutdown();
 
 public:

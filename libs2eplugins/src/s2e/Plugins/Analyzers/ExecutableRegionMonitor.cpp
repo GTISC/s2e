@@ -140,6 +140,19 @@ unsigned ExecutableRegionMonitor::behaviorStage(S2EExecutionState *state, Behavi
     return plgState->oracle.stage(goal);
 }
 
+bool ExecutableRegionMonitor::isTrackedDynamicCode(S2EExecutionState *state, uint64_t pc) {
+    DECLARE_PLUGINSTATE(ExecutableRegionMonitorState, state);
+    const uint64_t pid = m_windows->getCurrentProcessId(state);
+    if (m_requireInstrumentationReady && !isTrustedThread(plgState, pid, m_windows->getCurrentThreadId(state))) {
+        return false;
+    }
+    if (m_modules->getModule(state, pid, pc))
+        return false;
+    return std::any_of(plgState->regions.begin(), plgState->regions.end(), [&](const ExecutableRegion &region) {
+        return region.executed && region.pid == pid && region.start <= pc && pc < region.end;
+    });
+}
+
 void ExecutableRegionMonitor::initialize() {
     m_windows = dynamic_cast<WindowsMonitor *>(s2e()->getPlugin("OSMonitor"));
     if (!m_windows) {

@@ -183,7 +183,7 @@ public:
                 }
             }
         }
-        for (auto it : elements) {
+        for (const auto &it : b.elements) {
             auto &array = it.first;
             if (!wholeObjects.count(array)) {
                 auto it2 = elements.find(array);

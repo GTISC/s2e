@@ -1,0 +1,2 @@
+add_klee_unit_test(SolverTest IndependentSolverTest.cpp)
+target_link_libraries(SolverTest PRIVATE kleaverSolver kleaverExpr kleeSupport kleeBasic gomp)

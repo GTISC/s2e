@@ -55,6 +55,7 @@ public:
 
     void initialize();
     unsigned behaviorStage(S2EExecutionState *state, BehaviorGoal goal);
+    bool isTrackedDynamicCode(S2EExecutionState *state, uint64_t pc);
     virtual void handleOpcodeInvocation(S2EExecutionState *state, uint64_t guestDataPtr, uint64_t guestDataSize);
 };
 

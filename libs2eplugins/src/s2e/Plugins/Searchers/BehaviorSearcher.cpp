@@ -11,6 +11,7 @@
 #include <klee/util/ExprUtil.h>
 
 #include <algorithm>
+#include <fstream>
 #include <iterator>
 #include <random>
 #include <sstream>
@@ -28,6 +29,7 @@ bool BehaviorSearcher::parseConfig() {
     bool ok = false;
     const auto goal = cfg->getString(getConfigKey() + ".behaviorGoal", "");
     m_behaviorGoal = parseBehaviorGoal(goal);
+    m_profileBranches = cfg->getBool(getConfigKey() + ".profileBranches", false);
     if (!goal.empty() && m_behaviorGoal == BehaviorGoal::None) {
         getWarningsStream() << "BehaviorSearcher: unsupported behaviorGoal " << goal << "\n";
         return false;
@@ -40,7 +42,7 @@ bool BehaviorSearcher::parseConfig() {
 
     const std::string key = getConfigKey() + ".distance";
     int count = cfg->getListSize(key, &ok);
-    if (!ok || count <= 0) {
+    if (!ok || (count <= 0 && m_behaviorGoal == BehaviorGoal::None && !m_profileBranches)) {
         getWarningsStream() << "BehaviorSearcher: distance must contain at least one range\n";
         return false;
     }
@@ -196,9 +198,9 @@ void BehaviorSearcher::initialize() {
     m_detector = s2e()->getPlugin<ModuleExecutionDetector>();
     m_searchers = s2e()->getPlugin<MultiSearcher>();
     m_coverage = s2e()->getPlugin<coverage::TranslationBlockCoverage>();
-    if (m_behaviorGoal != BehaviorGoal::None) {
+    if (m_behaviorGoal != BehaviorGoal::None || m_profileBranches) {
         m_regionMonitor = s2e()->getPlugin<ExecutableRegionMonitor>();
-        if (!m_regionMonitor) {
+        if (!m_regionMonitor && m_behaviorGoal != BehaviorGoal::None) {
             getWarningsStream() << "BehaviorSearcher: behaviorGoal requires ExecutableRegionMonitor\n";
             exit(-1);
         }
@@ -319,14 +321,61 @@ bool BehaviorSearcher::takeForkGateEscape(double probability, S2EExecutionState 
     return std::uniform_real_distribution<double>(0.0, 1.0)(random) < probability;
 }
 
+void BehaviorSearcher::profileBranch(S2EExecutionState *state, uint64_t pc, const klee::ref<klee::Expr> &condition,
+                                     bool dynamic) {
+    // Profiling is opt-in and bounded. It observes the actual KLEE condition;
+    // source proximity in a CFG is not represented as a dependency proof.
+    if (m_branchProfiles > 1024)
+        return;
+    std::ofstream output(s2e()->getOutputFilename("branch-dependencies.jsonl"), std::ios::app);
+    if (m_branchProfiles++ == 1024) {
+        output << "{\"truncated\":true,\"reason\":\"profile_budget\"}\n";
+        return;
+    }
+    std::vector<klee::ref<klee::ReadExpr>> reads;
+    klee::findReads(condition, true, reads);
+    output << "{\"schema\":1,\"state\":" << state->getID() << ",\"pc\":" << pc
+           << ",\"dynamic\":" << (dynamic ? "true" : "false") << ",\"constraints\":" << state->constraints().size()
+           << ",\"truncated\":" << (reads.size() > 128 ? "true" : "false") << ",\"reads\":[";
+    bool first = true;
+    for (size_t i = 0; i < std::min(reads.size(), size_t(128)); ++i) {
+        const auto &read = reads[i];
+        const auto &array = read->getUpdates()->getRoot();
+        if (!first)
+            output << ',';
+        first = false;
+        // Hex encoding preserves even unusual guest names without letting
+        // control characters manufacture extra records in the native journal.
+        output << "{\"source_hex\":\"";
+        const char *digits = "0123456789abcdef";
+        for (unsigned char ch : array->getRawName())
+            output << digits[ch >> 4] << digits[ch & 15];
+        output << "\",\"size\":" << array->getSize() << ",\"index\":";
+        auto index = dyn_cast<klee::ConstantExpr>(read->getIndex());
+        if (index)
+            output << index->getZExtValue();
+        else
+            output << "null";
+        output << '}';
+    }
+    output << "]}\n";
+}
+
 void BehaviorSearcher::onStateForkSelect(S2EExecutionState *state, const klee::ref<klee::Expr> &condition,
                                          CorePlugin::StateForkPreference &preference) {
-    if (!m_forkGateEnabled || preference != CorePlugin::StateForkPreference::NONE || !condition) {
+    if (preference != CorePlugin::StateForkPreference::NONE || !condition) {
         return;
     }
 
     auto module = m_detector->getCurrentDescriptor(state);
     if (!module || module->Name != m_moduleName) {
+        if (m_profileBranches && m_regionMonitor &&
+            m_regionMonitor->isTrackedDynamicCode(state, state->regs()->getPc())) {
+            uint64_t a, b;
+            if (state->getCurrentStaticBranchTargets(&a, &b)) {
+                profileBranch(state, state->regs()->getPc(), condition, true);
+            }
+        }
         return;
     }
 
@@ -342,6 +391,11 @@ void BehaviorSearcher::onStateForkSelect(S2EExecutionState *state, const klee::r
     if (!module->ToNativeBase(state->regs()->getPc(), nativeSource)) {
         return;
     }
+    if (m_profileBranches)
+        profileBranch(state, nativeSource, condition);
+    // An absent CFG is unknown, not a proof of branch irrelevance.
+    if (!m_forkGateEnabled || m_distances.empty())
+        return;
     ++m_forkGateDecisions;
 
     struct SuccessorImpact {
@@ -416,7 +470,10 @@ void BehaviorSearcher::onStateForkSelect(S2EExecutionState *state, const klee::r
     // explicit avoid edges remain enforced by EdgeKiller. This conservative
     // fallback is bounded by the normal state/run budgets, not random escape.
     const unsigned stage = behaviorStage(state);
-    if (stage && stage < behaviorGoalStages(m_behaviorGoal) && !impacts[0].avoided && !impacts[1].avoided) {
+    const auto trackedState = m_states.find(state);
+    const bool milestoneReached = trackedState != m_states.end() && trackedState->second.targetReached;
+    if (milestoneReached && stage && stage < behaviorGoalStages(m_behaviorGoal) && !impacts[0].avoided &&
+        !impacts[1].avoided) {
         ++m_forkGateAllowed;
         getInfoStream(state) << "BehaviorSearcher: semantic continuation goal=" << behaviorGoalName(m_behaviorGoal)
                              << " stage=" << stage << " source=" << hexval(nativeSource) << "\n";
@@ -521,7 +578,7 @@ bool BehaviorSearcher::hasUnsaturatedAlternative(S2EExecutionState *current) con
         if (entry.first == current || isCoolingDown(entry.second) || isTargetSaturated(entry.first, entry.second)) {
             continue;
         }
-        if (effectiveDistance(entry.second) != UNREACHABLE || behaviorStage(entry.first)) {
+        if (m_distances.empty() || effectiveDistance(entry.second) != UNREACHABLE || behaviorStage(entry.first)) {
             return true;
         }
     }
@@ -556,7 +613,7 @@ bool BehaviorSearcher::hasRunnableAlternative(S2EExecutionState *current, uint64
             continue;
         }
         uint64_t distance = effectiveDistance(entry.second);
-        if (distance == UNREACHABLE && !behaviorStage(entry.first)) {
+        if (!m_distances.empty() && distance == UNREACHABLE && !behaviorStage(entry.first)) {
             continue;
         }
         if (allowAnyDistance || currentDistance == UNREACHABLE || distance <= distanceLimit ||

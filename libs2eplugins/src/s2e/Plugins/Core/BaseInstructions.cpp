@@ -99,6 +99,38 @@ public:
 void BaseInstructions::initialize() {
     ConfigFile *cfg = s2e()->getConfig();
 
+    const auto sparseKey = getConfigKey() + ".symbolicRanges";
+    if (cfg->hasKey(sparseKey)) {
+        bool ok = false;
+        const int count = cfg->getListSize(sparseKey, &ok);
+        if (!ok || count < 0 || count > 128)
+            exit(-1);
+        for (int i = 1; i <= count; ++i) {
+            const auto key = sparseKey + "[" + std::to_string(i) + "]";
+            const auto name = cfg->getString(key + ".source", "", &ok);
+            if (!ok)
+                exit(-1);
+            const int rangeCount = cfg->getListSize(key + ".ranges", &ok);
+            if (!ok || rangeCount <= 0 || rangeCount > 128)
+                exit(-1);
+            SparseSymbolicPolicy::Ranges ranges;
+            for (int j = 1; j <= rangeCount; ++j) {
+                const auto entry = key + ".ranges[" + std::to_string(j) + "]";
+                int64_t start = cfg->getInt(entry + "[1]", -1, &ok);
+                if (!ok || start < 0 || start > 4096)
+                    exit(-1);
+                int64_t end = cfg->getInt(entry + "[2]", -1, &ok);
+                if (!ok || end < 0 || end > 4096)
+                    exit(-1);
+                ranges.emplace_back(start, end);
+            }
+            if (!m_sparsePolicy.add(name, ranges)) {
+                getWarningsStream() << "Invalid sparse symbolic range policy for " << name << "\n";
+                exit(-1);
+            }
+        }
+    }
+
     m_monitor = nullptr;
     if (cfg->getBool(getConfigKey() + ".restrict", false)) {
         m_monitor = dynamic_cast<OSMonitor *>(s2e()->getPlugin("OSMonitor"));
@@ -218,7 +250,22 @@ void BaseInstructions::makeSymbolic(S2EExecutionState *state) {
         getWarningsStream(state) << "Error reading string from the guest\n";
     }
 
-    makeSymbolic(state, address, size, nameStr);
+    const auto *policy = m_sparsePolicy.match(nameStr);
+    if (!policy) {
+        makeSymbolic(state, address, size, nameStr);
+        return;
+    }
+    // Only the guest opcode is narrowed. Internal callers asking for a single
+    // varName/varData retain their original API contract. Unselected bytes are
+    // left untouched, including any pre-existing symbolic expressions.
+    unsigned selected = 0;
+    for (const auto &range : SparseSymbolicPolicy::clipped(*policy, size)) {
+        const unsigned length = range.second - range.first;
+        makeSymbolic(state, address + range.first, length, nameStr + ".offset" + std::to_string(range.first));
+        selected += length;
+    }
+    getInfoStream(state) << "SparseSymbolization: source=" << nameStr << " requested=" << size
+                         << " selected=" << selected << "\n";
 }
 
 void BaseInstructions::isSymbolic(S2EExecutionState *state) {
