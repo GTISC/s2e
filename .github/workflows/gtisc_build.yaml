@@ -8,7 +8,7 @@ on:
       - master
 jobs:
   build:
-      runs-on: [self-hosted, ubuntu-129, Linux]
+      runs-on: [self-hosted, general1, Linux]
       steps:
         - name: checkout code
           uses: actions/checkout@v4
