@@ -24,6 +24,7 @@ add_library(
     s2eplugins
 
     s2e/Plugins/FunctionCallLogger.cpp
+    s2e/Plugins/Analyzers/ManagedRuntime.cpp
 
     s2e/Plugins/ConstraintsDumper.cpp
 

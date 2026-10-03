@@ -28,4 +28,5 @@ add_subdirectory(s2ecmd)
 
 install(FILES include/s2e/s2e.h
               include/s2e/opcodes.h
+              include/s2e/managed.h
         DESTINATION include/s2e)
