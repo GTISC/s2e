@@ -1,0 +1,28 @@
+name: Managed runtime contracts
+
+on:
+  pull_request:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  contracts:
+    runs-on: ubuntu-22.04
+    strategy:
+      matrix:
+        compiler: [gcc, clang]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure standalone protocol and lifetime tests
+        env:
+          CC: ${{ matrix.compiler }}
+          CXX: ${{ matrix.compiler == 'gcc' && 'g++' || 'clang++' }}
+        run: cmake -S libs2eplugins/tests -B build-managed -DCMAKE_BUILD_TYPE=Release
+      - name: Build
+        run: cmake --build build-managed --parallel 2
+      - name: Test
+        run: ctest --test-dir build-managed --output-on-failure

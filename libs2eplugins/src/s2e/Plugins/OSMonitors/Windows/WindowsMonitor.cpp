@@ -925,10 +925,15 @@ void WindowsMonitor::handleOpcodeInvocation(S2EExecutionState *state, uint64_t g
         } break;
 
         case UNLOAD_PROCESS: {
-            uint64_t returnCode = 0;
-            if (!state->mem()->read(command.Process.EProcess + m_kernel.EProcessExitStatusOffset, &returnCode,
-                                    sizeof(uint64_t))) {
+            // EPROCESS.ExitStatus is a 32-bit NTSTATUS on both architectures.
+            // Preserve read failure as an out-of-DWORD sentinel, never success.
+            uint32_t exitStatus = 0;
+            uint64_t returnCode = UINT64_MAX;
+            if (!state->mem()->read(command.Process.EProcess + m_kernel.EProcessExitStatusOffset, &exitStatus,
+                                    sizeof(exitStatus))) {
                 getWarningsStream(state) << "could not read process return code\n";
+            } else {
+                returnCode = exitStatus;
             }
 
             DECLARE_PLUGINSTATE(WindowsMonitorState, state);
