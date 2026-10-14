@@ -555,12 +555,6 @@ void ExecutableRegionMonitor::onBlockExecute(S2EExecutionState *state, uint64_t 
                 }
             }
             plgState->armedPids.insert(pid);
-            DescendantProcess root;
-            root.lifetime = m_nextProcessId++;
-            root.parentPid = m_windows->getProcessParent(state, pid);
-            root.imageName = lowerCase(module->Name);
-            plgState->descendants[pid] = root;
-            recordChild(state, "activated-image", pid, pc);
             plgState->trustedThreads[pid].insert(m_windows->getCurrentThreadId(state));
             recordChild(state, injectedExecution ? "activated-injected" : "activated-image", pid, pc);
             getInfoStream(state) << "ExecutableRegionMonitor: childActivated parentPid="
@@ -577,6 +571,12 @@ void ExecutableRegionMonitor::onBlockExecute(S2EExecutionState *state, uint64_t 
                 return;
             }
             plgState->armedPids.insert(pid);
+            DescendantProcess root;
+            root.lifetime = m_nextProcessId++;
+            root.parentPid = m_windows->getProcessParent(state, pid);
+            root.imageName = lowerCase(module->Name);
+            plgState->descendants[pid] = root;
+            recordChild(state, "activated-image", pid, pc);
             getInfoStream(state) << "ExecutableRegionMonitor: armed pid=" << hexval(pid) << " module=" << module->Name
                                  << " pc=" << hexval(pc) << "\n";
         }
