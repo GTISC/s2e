@@ -255,10 +255,19 @@ void FunctionCallLogger::onReturn(S2EExecutionState *state, const ModuleDescript
     if (!call.recordEffect)
         return;
     uint32_t bytes = 0;
+    std::string bufferPrefix;
     if (call.api == "WriteFile") {
         // Pending/overlapped writes and unknown handles are not certified effects.
         if (call.path.empty() || call.args[4] || !read32(call.args[3], bytes) || !bytes || bytes > call.args[2])
             return;
+        // Observe only already concrete bytes. Evidence collection must never
+        // concretize symbolic inputs or certify an unreadable buffer prefix.
+        for (uint32_t i = 0; i < std::min(bytes, uint32_t(4096)); ++i) {
+            const auto value = state->mem()->read(call.args[1] + i, klee::Expr::Int8);
+            const auto constant = dyn_cast_or_null<klee::ConstantExpr>(value);
+            if (!constant) break;
+            bufferPrefix += static_cast<char>(constant->getZExtValue());
+        }
     }
     auto hex = [](const std::string &s) {
         std::string out;
@@ -281,6 +290,7 @@ void FunctionCallLogger::onReturn(S2EExecutionState *state, const ModuleDescript
         << ",\"depth\":" << depth << ",\"diagnostic_lineage\":" << (diagnostic ? "true" : "false") << ",\"api\":\""
         << call.api << "\",\"path_hex\":\"" << hex(call.path) << "\",\"value_hex\":\"" << hex(call.value)
         << "\",\"data_hex\":\"" << hex(call.data) << "\",\"bytes_written\":" << bytes
+        << ",\"buffer_prefix_hex\":\"" << hex(bufferPrefix) << "\",\"buffer_prefix_bytes\":" << bufferPrefix.size()
         << ",\"registry_type\":" << (registry ? call.args[3] : 0) << ",\"return_value\":" << result << "}\n";
     out.close();
     if (!out)

@@ -818,6 +818,18 @@ void ExecutableRegionMonitor::onProcessUnload(S2EExecutionState *state, uint64_t
     DECLARE_PLUGINSTATE(ExecutableRegionMonitorState, state);
     if (plgState->descendants.count(pid)) {
         recordChild(state, "exited", pid);
+        const auto &owner = plgState->descendants.at(pid);
+        const bool valid = returnCode <= UINT32_MAX;
+        std::ofstream out(s2e()->getOutputFilename("process-exits.jsonl"), std::ios::app);
+        out << "{\"schema\":1,\"instance\":" << s2e()->getCurrentInstanceIndex()
+            << ",\"state\":" << state->getID() << ",\"pid\":" << pid << ",\"lifetime\":" << owner.lifetime
+            << ",\"depth\":" << owner.depth << ",\"time_ns\":"
+            << std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count()
+            << ",\"diagnostic_lineage\":" << (owner.diagnostic ? "true" : "false")
+            << ",\"return_code_valid\":" << (valid ? "true" : "false")
+            << ",\"return_code\":" << (valid ? returnCode : 0) << "}\n";
+        out.close();
+        if (!out) getWarningsStream(state) << "ExecutableRegionMonitor: could not persist process exit\n";
     }
     plgState->oracle.processExited(pid);
     plgState->regions.erase(std::remove_if(plgState->regions.begin(), plgState->regions.end(),
