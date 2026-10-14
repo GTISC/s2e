@@ -30,6 +30,7 @@
 #include <s2e/Plugins/ExecutionMonitors/FunctionMonitor.h>
 #include <s2e/Plugins/OSMonitors/Support/ModuleExecutionDetector.h>
 #include <string>
+#include <tuple>
 
 namespace s2e {
 namespace plugins {
@@ -42,6 +43,8 @@ struct ObservedWindowsCall {
     uint32_t args[9] = {};
     bool diagnostic = false;
     bool recordEffect = false;
+    uint64_t callerPc = 0;
+    uint32_t requested = 0;
 };
 
 enum S2E_FUNCTIONCALLLOGGER_COMMANDS {
@@ -74,7 +77,17 @@ private:
     ExecutableRegionMonitor *m_regions = nullptr;
     Vmi *m_vmi = nullptr;
     bool m_observeWindowsEffects = false;
+    bool m_discoverRootInputs = false;
+    bool m_discoverChildInputs = false;
+    struct InputJournal {
+        bool enabled = false;
+        unsigned count = 0;
+        std::map<std::tuple<uint64_t, uint64_t, uint64_t, std::string, std::string, std::string>, unsigned> sources;
+    };
+    std::map<unsigned, InputJournal> m_inputJournals;
     std::map<std::string, std::map<uint64_t, std::string>> m_exports;
+    void enableInputJournal();
+    void observeInput(S2EExecutionState *state, const ObservedWindowsCall &call, uint32_t result);
     void onReturn(S2EExecutionState *state, const ModuleDescriptorConstPtr &source,
                   const ModuleDescriptorConstPtr &dest, uint64_t pc, ObservedWindowsCall call);
     void onProcessUnload(S2EExecutionState *state, uint64_t addressSpace, uint64_t pid, uint64_t returnCode);

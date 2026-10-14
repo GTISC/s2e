@@ -34,6 +34,7 @@
 #include <tuple>
 
 #include "FunctionCallLogger.h"
+#include "WindowsInputObservation.h"
 
 namespace s2e {
 namespace plugins {
@@ -53,7 +54,7 @@ class FunctionCallLoggerState : public PluginState {
     // Declare any methods and fields you need here
 
 public:
-    std::map<std::tuple<uint64_t, uint64_t, uint32_t>, std::string> handles;
+    std::map<std::tuple<uint64_t, uint64_t, uint32_t>, std::string> fileHandles, registryHandles;
     uint64_t events = 0;
     static PluginState *factory(Plugin *p, S2EExecutionState *s) {
         return new FunctionCallLoggerState();
@@ -76,41 +77,142 @@ void FunctionCallLogger::initialize() {
     m_detector = s2e()->getPlugin<ModuleExecutionDetector>();
     FunctionMonitor *monitor = s2e()->getPlugin<FunctionMonitor>();
     m_observeWindowsEffects = s2e()->getConfig()->getBool(getConfigKey() + ".observeWindowsEffects", false);
+    m_discoverRootInputs = s2e()->getConfig()->getBool(getConfigKey() + ".discoverRootInputs", false);
+    m_discoverChildInputs = s2e()->getConfig()->getBool(getConfigKey() + ".discoverChildInputs", false);
     m_regions = s2e()->getPlugin<ExecutableRegionMonitor>();
     m_vmi = s2e()->getPlugin<Vmi>();
-    if (m_observeWindowsEffects && (!m_regions || !m_vmi)) {
+    const bool observe = m_observeWindowsEffects || m_discoverRootInputs || m_discoverChildInputs;
+    if (observe && (!m_regions || !m_vmi)) {
         getWarningsStream() << "Windows effect observation requires ExecutableRegionMonitor and Vmi\n";
         exit(-1);
     }
-    if (m_observeWindowsEffects) {
+    if (observe) {
         auto os = static_cast<OSMonitor *>(s2e()->getPlugin("OSMonitor"));
         os->onProcessUnload.connect(sigc::mem_fun(*this, &FunctionCallLogger::onProcessUnload));
     }
     monitor->onCall.connect(sigc::mem_fun(*this, &FunctionCallLogger::onCall));
-    if (m_observeWindowsEffects) {
+    if (observe) {
         monitor->onTailCall.connect(sigc::mem_fun(*this, &FunctionCallLogger::onCall));
     }
+    if (m_discoverRootInputs || m_discoverChildInputs) enableInputJournal();
 }
 
 void FunctionCallLogger::onProcessUnload(S2EExecutionState *state, uint64_t addressSpace, uint64_t pid,
                                          uint64_t returnCode) {
     DECLARE_PLUGINSTATE(FunctionCallLoggerState, state);
-    for (auto it = plgState->handles.begin(); it != plgState->handles.end();) {
-        if (std::get<0>(it->first) == pid)
-            it = plgState->handles.erase(it);
-        else
-            ++it;
+    for (auto handles : {&plgState->fileHandles, &plgState->registryHandles}) {
+        for (auto it = handles->begin(); it != handles->end();) {
+            if (std::get<0>(it->first) == pid) it = handles->erase(it);
+            else ++it;
+        }
+    }
+}
+
+static std::string inputHex(const std::string &bytes) {
+    std::string result;
+    result.reserve(bytes.size() * 2);
+    for (unsigned char c : bytes) {
+        result += "0123456789abcdef"[c >> 4];
+        result += "0123456789abcdef"[c & 15];
+    }
+    return result;
+}
+
+void FunctionCallLogger::enableInputJournal() {
+    auto &journal = m_inputJournals[s2e()->getCurrentInstanceIndex()];
+    if (journal.enabled) return;
+    std::ofstream out(s2e()->getOutputFilename("child-input-observations.jsonl"), std::ios::app);
+    out << "{\"schema\":3,\"event\":\"enabled\",\"instance\":" << s2e()->getCurrentInstanceIndex()
+        << ",\"child_scope\":" << (m_discoverChildInputs ? "true" : "false")
+        << ",\"root_scope\":" << (m_discoverRootInputs ? "true" : "false")
+        << ",\"input_process_scope\":false,\"source_models\":false}\n";
+    out.close();
+    journal.enabled = bool(out);
+    if (!out) getWarningsStream() << "Could not enable native input observation journal\n";
+}
+
+void FunctionCallLogger::observeInput(S2EExecutionState *state, const ObservedWindowsCall &call, uint32_t result) {
+    enableInputJournal();
+    auto &journal = m_inputJournals[s2e()->getCurrentInstanceIndex()];
+    if (!journal.enabled || journal.count >= 256) return;
+    const auto key = std::make_tuple(call.pid, call.lifetime, call.depth, call.api, call.path, call.value);
+    auto found = journal.sources.find(key);
+    if (found != journal.sources.end() && found->second >= 32) return;
+    auto read32 = [&](uint64_t address, uint32_t &value) {
+        if (!address) return false;
+        auto c = dyn_cast_or_null<klee::ConstantExpr>(state->mem()->read(address, klee::Expr::Int32));
+        if (!c) return false;
+        value = c->getZExtValue();
+        return true;
+    };
+    uint32_t buffer = 0, count = 0, requested = call.requested, registryType = 0;
+    std::string seed;
+    const unsigned width = call.api.back() == 'W' ? 2 : 1;
+    if (call.api == "ReadFile") {
+        if (!read32(call.args[3], count) ||
+            !input_observation::bufferExtent(count, requested, result != 0, call.args[4] != 0)) return;
+        buffer = call.args[1];
+    } else if (call.api.find("RegQueryValueEx") == 0) {
+        if (!read32(call.args[5], count) || !input_observation::bufferExtent(count, requested, result == 0) ||
+            (call.args[3] && !read32(call.args[3], registryType))) return;
+        buffer = call.args[4];
+    } else if (call.api.find("GetEnvironmentVariable") == 0) {
+        if (!input_observation::environmentExtent(result, call.args[2], width, count, requested)) return;
+        buffer = call.args[1];
+    } else if (call.api.find("GetCommandLine") == 0) {
+        if (!result) return;
+        buffer = result;
+        // Include the concrete terminator; reject truncated or symbolic strings.
+        for (unsigned offset = 0; offset < 256; offset += width) {
+            auto c = dyn_cast_or_null<klee::ConstantExpr>(state->mem()->read(buffer + offset,
+                                                       width == 2 ? klee::Expr::Int16 : klee::Expr::Int8));
+            if (!c) return;
+            if (!c->getZExtValue()) { count = requested = offset + width; break; }
+        }
+        if (count <= width) return;
+    } else return;
+    if (!buffer || uint64_t(buffer) + count > (uint64_t(1) << 32)) return;
+    for (uint32_t i = 0; i < count; ++i) {
+        auto c = dyn_cast_or_null<klee::ConstantExpr>(state->mem()->read(uint64_t(buffer) + i, klee::Expr::Int8));
+        if (!c) return;
+        seed += static_cast<char>(c->getZExtValue());
+    }
+    std::ofstream out(s2e()->getOutputFilename("child-input-observations.jsonl"), std::ios::app);
+    out << "{\"schema\":3,\"event\":\"read\",\"instance\":" << s2e()->getCurrentInstanceIndex()
+        << ",\"state\":" << state->getID() << ",\"pid\":" << call.pid << ",\"lifetime\":" << call.lifetime
+        << ",\"depth\":" << call.depth << ",\"time_ns\":"
+        << std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count()
+        << ",\"caller_pc\":" << call.callerPc << ",\"diagnostic_lineage\":false,\"api\":\"" << call.api
+        << "\",\"path_hex\":\"" << inputHex(call.path) << "\",\"value_hex\":\"" << inputHex(call.value)
+        << "\",\"seed_hex\":\"" << inputHex(seed) << "\",\"count\":" << count << ",\"requested\":" << requested
+        << ",\"registry_type\":" << registryType << ",\"return_value\":" << result << ",\"overlapped\":false}\n";
+    out.close();
+    if (!out) { getWarningsStream(state) << "Could not persist native input observation\n"; return; }
+    const unsigned sourceCount = ++journal.sources[key];
+    ++journal.count;
+    if (sourceCount == 32 || journal.count == 256) {
+        std::ofstream cap(s2e()->getOutputFilename("child-input-observations.jsonl"), std::ios::app);
+        if (sourceCount == 32) {
+            cap << "{\"schema\":3,\"event\":\"source_cap\",\"instance\":" << s2e()->getCurrentInstanceIndex()
+                << ",\"pid\":" << call.pid << ",\"lifetime\":" << call.lifetime << ",\"depth\":" << call.depth
+                << ",\"api\":\"" << call.api << "\",\"path_hex\":\"" << inputHex(call.path)
+                << "\",\"value_hex\":\"" << inputHex(call.value) << "\",\"limit\":32}\n";
+        }
+        if (journal.count == 256)
+            cap << "{\"schema\":3,\"event\":\"cap\",\"instance\":" << s2e()->getCurrentInstanceIndex() << "}\n";
     }
 }
 
 void FunctionCallLogger::onCall(S2EExecutionState *state, const ModuleDescriptorConstPtr &source,
                                 const ModuleDescriptorConstPtr &dest, uint64_t callerPc, uint64_t calleePc,
                                 const FunctionMonitor::ReturnSignalPtr &returnSignal) {
-    if (!m_observeWindowsEffects || state->getPointerSize() != 4 || !dest)
+    if (!(m_observeWindowsEffects || m_discoverRootInputs || m_discoverChildInputs) ||
+        state->getPointerSize() != 4 || !dest)
         return;
     if (dest->Name != "kernel32.dll" && dest->Name != "kernelbase.dll" && dest->Name != "advapi32.dll")
         return;
     ObservedWindowsCall call;
+    call.callerPc = callerPc;
     call.recordEffect = !source || source->Name.size() < 4 || source->Name.substr(source->Name.size() - 4) != ".dll";
     if (!m_regions->getProcessContext(state, call.pid, call.lifetime, call.depth, call.diagnostic))
         return;
@@ -133,7 +235,9 @@ void FunctionCallLogger::onCall(S2EExecutionState *state, const ModuleDescriptor
         {"CreateFileA", 7},   {"CreateFileW", 7},     {"CopyFileA", 3},       {"CopyFileW", 3},
         {"WriteFile", 5},     {"CloseHandle", 1},     {"RegCloseKey", 1},     {"RegOpenKeyExA", 5},
         {"RegOpenKeyExW", 5}, {"RegCreateKeyExA", 9}, {"RegCreateKeyExW", 9}, {"RegSetValueExA", 6},
-        {"RegSetValueExW", 6}};
+        {"RegSetValueExW", 6}, {"ReadFile", 5}, {"RegQueryValueExA", 6}, {"RegQueryValueExW", 6},
+        {"GetEnvironmentVariableA", 3}, {"GetEnvironmentVariableW", 3},
+        {"GetCommandLineA", 0}, {"GetCommandLineW", 0}};
     auto count = supported.find(call.api);
     if (count == supported.end())
         return;
@@ -170,8 +274,9 @@ void FunctionCallLogger::onCall(S2EExecutionState *state, const ModuleDescriptor
     };
     DECLARE_PLUGINSTATE(FunctionCallLoggerState, state);
     auto handle = std::make_tuple(call.pid, call.lifetime, call.args[0]);
-    auto known = plgState->handles.find(handle);
-    if (known != plgState->handles.end())
+    auto &handles = call.api.find("Reg") == 0 ? plgState->registryHandles : plgState->fileHandles;
+    auto known = handles.find(handle);
+    if (known != handles.end())
         call.path = known->second;
     else if (call.args[0] == 0x80000001)
         call.path = "HKEY_CURRENT_USER";
@@ -183,6 +288,17 @@ void FunctionCallLogger::onCall(S2EExecutionState *state, const ModuleDescriptor
         call.path.clear();
         if (!readText(call.args[0], call.path))
             return;
+    } else if (call.api == "ReadFile") {
+        if (call.path.empty() || call.args[4]) return;
+        call.requested = call.args[2];
+    } else if (call.api.find("RegQueryValueEx") == 0) {
+        if (call.path.empty() || (call.args[1] && !readText(call.args[1], call.value)) ||
+            !call.args[4] || !read32(call.args[5], call.requested)) return;
+    } else if (call.api.find("GetEnvironmentVariable") == 0) {
+        call.path.clear();
+        if (!readText(call.args[0], call.path)) return;
+    } else if (call.api.find("GetCommandLine") == 0) {
+        call.path = "process_command_line";
     } else if (call.api.find("CopyFile") == 0) {
         call.path.clear();
         if (!readText(call.args[1], call.path))
@@ -223,9 +339,10 @@ void FunctionCallLogger::onReturn(S2EExecutionState *state, const ModuleDescript
     DECLARE_PLUGINSTATE(FunctionCallLoggerState, state);
     auto handle = std::make_tuple(pid, lifetime, call.args[0]);
     bool registry = call.api.find("Reg") == 0;
+    auto &handles = registry ? plgState->registryHandles : plgState->fileHandles;
     if (call.api == "CloseHandle" || call.api == "RegCloseKey") {
         if (registry ? result == 0 : result != 0)
-            plgState->handles.erase(handle);
+            handles.erase(handle);
         return;
     }
     auto read32 = [&](uint64_t address, uint32_t &value) {
@@ -237,8 +354,14 @@ void FunctionCallLogger::onReturn(S2EExecutionState *state, const ModuleDescript
         return true;
     };
     if (call.api.find("CreateFile") == 0) {
-        if (result != UINT32_MAX && plgState->handles.size() < 4096)
-            plgState->handles[std::make_tuple(pid, lifetime, result)] = call.path;
+        if (result != UINT32_MAX && (handles.size() < 4096 || handles.count(std::make_tuple(pid, lifetime, result))))
+            handles[std::make_tuple(pid, lifetime, result)] = call.path;
+        return;
+    }
+    if (call.api == "ReadFile" || call.api.find("RegQueryValueEx") == 0 ||
+        call.api.find("GetEnvironmentVariable") == 0 || call.api.find("GetCommandLine") == 0) {
+        if (call.recordEffect && !call.diagnostic && (depth ? m_discoverChildInputs : m_discoverRootInputs))
+            observeInput(state, call, result);
         return;
     }
     if (registry && result != 0)
@@ -246,13 +369,13 @@ void FunctionCallLogger::onReturn(S2EExecutionState *state, const ModuleDescript
     if (call.api.find("RegOpenKey") == 0 || call.api.find("RegCreateKey") == 0) {
         uint32_t key;
         unsigned index = call.api.find("RegOpenKey") == 0 ? 4 : 7;
-        if (read32(call.args[index], key) && plgState->handles.size() < 4096)
-            plgState->handles[std::make_tuple(pid, lifetime, key)] = call.path;
+        if (read32(call.args[index], key) && (handles.size() < 4096 || handles.count(std::make_tuple(pid, lifetime, key))))
+            handles[std::make_tuple(pid, lifetime, key)] = call.path;
         return;
     }
     if (!registry && !result)
         return;
-    if (!call.recordEffect)
+    if (!call.recordEffect || !m_observeWindowsEffects)
         return;
     uint32_t bytes = 0;
     std::string bufferPrefix;
