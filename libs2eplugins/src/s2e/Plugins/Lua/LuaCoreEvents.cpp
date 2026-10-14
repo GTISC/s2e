@@ -26,6 +26,7 @@
 #include <s2e/S2EExecutor.h>
 #include <s2e/Utils.h>
 
+#include <s2e/Plugins/Analyzers/ExecutableRegionMonitor.h>
 #include "LuaCoreEvents.h"
 #include "LuaInstrumentationState.h"
 #include "LuaS2EExecutionState.h"
@@ -36,6 +37,27 @@ namespace plugins {
 S2E_DEFINE_PLUGIN(LuaCoreEvents, "Exposes core events to lua scripts", "", "LuaBindings");
 
 void LuaCoreEvents::initialize() {
+    auto maximum = s2e()->getConfig()->getInt(getConfigKey() + ".maxDynamicForks", 0);
+    if (maximum < 0 || maximum > 128) {
+        getWarningsStream() << "maxDynamicForks must be in 0..128\n";
+        exit(-1);
+    }
+    m_maxDynamicForks = maximum;
+    auto siteLimit = s2e()->getConfig()->getInt(getConfigKey() + ".maxDynamicForksPerSite", 1);
+    auto loopLimit = s2e()->getConfig()->getInt(getConfigKey() + ".maxDynamicLoopForks", 2);
+    if (siteLimit < 1 || siteLimit > 128 || loopLimit < 0 || loopLimit > 128) {
+        getWarningsStream() << "dynamic site limit must be in 1..128 and loop limit in 0..128\n";
+        exit(-1);
+    }
+    m_maxDynamicForksPerSite = siteLimit;
+    m_maxDynamicLoopForks = loopLimit;
+    if (m_maxDynamicForks) {
+        m_regionMonitor = s2e()->getPlugin<ExecutableRegionMonitor>();
+        if (!m_regionMonitor) {
+            getWarningsStream() << "maxDynamicForks requires ExecutableRegionMonitor\n";
+            exit(-1);
+        }
+    }
     getInfoStream() << "Registering instrumentation for core signals\n";
     registerCoreSignals(getConfigKey());
 }
@@ -84,8 +106,25 @@ void LuaCoreEvents::onStateForkDecide(S2EExecutionState *state, const klee::ref<
     Lunar<LuaInstrumentationState>::push(L, &luaInstrumentation);
 
     lua_call(L, 2, 1);
-    allowForking = lua_toboolean(L, -1) != 0;
+    bool luaAllows = lua_toboolean(L, -1) != 0;
     lua_pop(L, 1);
+
+    uint64_t a, b, pid, allocation, offset;
+    const auto pc = state->regs()->getPc();
+    if (!luaAllows && allowForking && m_regionMonitor && m_dynamicBudget.total() < m_maxDynamicForks &&
+        state->getCurrentStaticBranchTargets(&a, &b) &&
+        m_regionMonitor->getDynamicCodeLocation(state, pc, pid, allocation, offset)) {
+        const bool backedge = a <= pc || b <= pc;
+        if (m_dynamicBudget.grant(pid, allocation, offset, backedge, m_maxDynamicForks,
+                                  m_maxDynamicForksPerSite, m_maxDynamicLoopForks)) {
+            luaAllows = true;
+            getInfoStream(state) << "trusted dynamic fork granted " << m_dynamicBudget.total() << "/" << m_maxDynamicForks
+                                 << " at " << hexval(pc) << " allocation=" << allocation
+                                 << " backedge=" << backedge << "\n";
+        }
+    }
+    // A Lua allow decision must not clear an earlier resource/safety veto.
+    allowForking = allowForking && luaAllows;
 
     if (!allowForking) {
         s2e()->getDebugStream() << "instrumentation prevented forking at pc=" << hexval(state->regs()->getPc()) << "\n";

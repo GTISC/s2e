@@ -30,9 +30,11 @@
 #include <s2e/S2EExecutionState.h>
 
 #include "Lua.h"
+#include "DynamicForkBudget.h"
 
 namespace s2e {
 namespace plugins {
+class ExecutableRegionMonitor;
 
 class LuaCoreEvents : public Plugin {
     S2E_PLUGIN
@@ -46,6 +48,11 @@ private:
     std::string m_onStateKill;
     std::string m_onTimer;
     std::string m_onStateForkDecide;
+    ExecutableRegionMonitor *m_regionMonitor = nullptr;
+    uint64_t m_maxDynamicForks = 0;
+    uint64_t m_maxDynamicForksPerSite = 1;
+    uint64_t m_maxDynamicLoopForks = 2;
+    DynamicForkBudget m_dynamicBudget;
 
     void registerCoreSignals(const std::string &cfgname);
     std::string checkCoreSignal(const std::string &cfgname, const std::string &name);

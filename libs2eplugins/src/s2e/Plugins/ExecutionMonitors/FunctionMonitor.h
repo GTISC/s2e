@@ -59,22 +59,29 @@ public:
     void initialize();
 
     // Source and/or dest module can be null
-    typedef sigc::signal<void, S2EExecutionState * /* state after return is completed */,
-                         const ModuleDescriptorConstPtr & /* module at return site */,
-                         const ModuleDescriptorConstPtr & /* module to which execution returns (ret addr) */,
-                         uint64_t /* return site */
-                         >
-        ReturnSignal;
+    struct ReturnSignal
+        : sigc::signal<void, S2EExecutionState * /* state after return is completed */,
+                       const ModuleDescriptorConstPtr & /* module at return site */,
+                       const ModuleDescriptorConstPtr & /* module to which execution returns (ret addr) */,
+                       uint64_t /* return site */
+                       > {
+        // Known callee ABI (e.g., Win32 stdcall). Defaults to caller cleanup.
+        // Register against post-return SP, avoiding instruction reads while translating.
+        uint64_t stackCleanup = 0;
+    };
 
     typedef std::shared_ptr<ReturnSignal> ReturnSignalPtr;
 
     ///
     /// \brief onCall
     ///
-    sigc::signal<void, S2EExecutionState *, const ModuleDescriptorConstPtr & /* caller module */,
-                 const ModuleDescriptorConstPtr & /* callee module */, uint64_t /* caller PC */,
-                 uint64_t /* callee PC */, const ReturnSignalPtr &>
-        onCall;
+    using CallSignal = sigc::signal<void, S2EExecutionState *, const ModuleDescriptorConstPtr & /* caller module */,
+                                    const ModuleDescriptorConstPtr & /* callee module */, uint64_t /* caller PC */,
+                                    uint64_t /* callee PC */, const ReturnSignalPtr &>;
+    CallSignal onCall;
+    // Import thunks tail-jump into APIs with the original return address on the
+    // stack. Separate notification keeps ordinary onCall clients unchanged.
+    CallSignal onTailCall;
 
 private:
     OSMonitor *m_monitor;
@@ -84,7 +91,7 @@ private:
     void onMonitorLoad(S2EExecutionState *state);
     void onProcessUnload(S2EExecutionState *state, uint64_t addressSpace, uint64_t pid, uint64_t returnCode);
     void onThreadExit(S2EExecutionState *state, const ThreadDescriptor &thread);
-    void onFunctionCall(S2EExecutionState *state, uint64_t pc);
+    void onFunctionCall(S2EExecutionState *state, uint64_t pc, bool tailCall);
     void onFunctionReturn(S2EExecutionState *state, uint64_t pc);
     void onTranslateBlockEnd(ExecutionSignal *signal, S2EExecutionState *state, TranslationBlock *tb, uint64_t pc,
                              bool isStatic, uint64_t staticTarget);

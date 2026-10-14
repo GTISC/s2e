@@ -11,6 +11,7 @@
 #include <klee/util/ExprUtil.h>
 
 #include <algorithm>
+#include <fstream>
 #include <iterator>
 #include <random>
 #include <sstream>
@@ -26,6 +27,13 @@ S2E_DEFINE_PLUGIN(BehaviorSearcher, "Target-directed behavior searcher", "Behavi
 bool BehaviorSearcher::parseConfig() {
     ConfigFile *cfg = s2e()->getConfig();
     bool ok = false;
+    const auto goal = cfg->getString(getConfigKey() + ".behaviorGoal", "");
+    m_behaviorGoal = parseBehaviorGoal(goal);
+    m_profileBranches = cfg->getBool(getConfigKey() + ".profileBranches", false);
+    if (!goal.empty() && m_behaviorGoal == BehaviorGoal::None) {
+        getWarningsStream() << "BehaviorSearcher: unsupported behaviorGoal " << goal << "\n";
+        return false;
+    }
     m_moduleName = cfg->getString(getConfigKey() + ".moduleName", "", &ok);
     if (!ok || m_moduleName.empty()) {
         getWarningsStream() << "BehaviorSearcher: moduleName is required\n";
@@ -34,7 +42,7 @@ bool BehaviorSearcher::parseConfig() {
 
     const std::string key = getConfigKey() + ".distance";
     int count = cfg->getListSize(key, &ok);
-    if (!ok || count <= 0) {
+    if (!ok || (count <= 0 && m_behaviorGoal == BehaviorGoal::None && !m_profileBranches)) {
         getWarningsStream() << "BehaviorSearcher: distance must contain at least one range\n";
         return false;
     }
@@ -190,6 +198,13 @@ void BehaviorSearcher::initialize() {
     m_detector = s2e()->getPlugin<ModuleExecutionDetector>();
     m_searchers = s2e()->getPlugin<MultiSearcher>();
     m_coverage = s2e()->getPlugin<coverage::TranslationBlockCoverage>();
+    if (m_behaviorGoal != BehaviorGoal::None || m_profileBranches) {
+        m_regionMonitor = s2e()->getPlugin<ExecutableRegionMonitor>();
+        if (!m_regionMonitor && m_behaviorGoal != BehaviorGoal::None) {
+            getWarningsStream() << "BehaviorSearcher: behaviorGoal requires ExecutableRegionMonitor\n";
+            exit(-1);
+        }
+    }
     m_detector->onModuleTranslateBlockStart.connect(
         sigc::mem_fun(*this, &BehaviorSearcher::onModuleTranslateBlockStart));
     m_coverage->onNewBlockCovered.connect(sigc::mem_fun(*this, &BehaviorSearcher::onNewBlockCovered));
@@ -197,6 +212,7 @@ void BehaviorSearcher::initialize() {
         sigc::mem_fun(*this, &BehaviorSearcher::onInitializationComplete));
     s2e()->getCorePlugin()->onStateFork.connect(sigc::mem_fun(*this, &BehaviorSearcher::onStateFork));
     s2e()->getCorePlugin()->onStateForkSelect.connect(sigc::mem_fun(*this, &BehaviorSearcher::onStateForkSelect));
+    s2e()->getCorePlugin()->onStateForkDecide.connect(sigc::mem_fun(*this, &BehaviorSearcher::onStateForkObserve));
     s2e()->getCorePlugin()->onStateSwitch.connect(sigc::mem_fun(*this, &BehaviorSearcher::onStateSwitch));
     s2e()->getCorePlugin()->onTimer.connect(sigc::mem_fun(*this, &BehaviorSearcher::onTimer));
     s2e()->getCorePlugin()->onEngineShutdown.connect(sigc::mem_fun(*this, &BehaviorSearcher::onEngineShutdown));
@@ -306,12 +322,70 @@ bool BehaviorSearcher::takeForkGateEscape(double probability, S2EExecutionState 
     return std::uniform_real_distribution<double>(0.0, 1.0)(random) < probability;
 }
 
-void BehaviorSearcher::onStateForkSelect(S2EExecutionState *state, const klee::ref<klee::Expr> &condition,
-                                         CorePlugin::StateForkPreference &preference) {
-    if (!m_forkGateEnabled || preference != CorePlugin::StateForkPreference::NONE || !condition) {
+void BehaviorSearcher::profileBranch(S2EExecutionState *state, uint64_t pc, const klee::ref<klee::Expr> &condition,
+                                     bool dynamic) {
+    // Profiling is opt-in and bounded. It observes the actual KLEE condition;
+    // source proximity in a CFG is not represented as a dependency proof.
+    if (m_branchProfiles > 1024)
+        return;
+    std::ofstream output(s2e()->getOutputFilename("branch-dependencies.jsonl"), std::ios::app);
+    if (m_branchProfiles++ == 1024) {
+        output << "{\"truncated\":true,\"reason\":\"profile_budget\"}\n";
         return;
     }
+    std::vector<klee::ref<klee::ReadExpr>> reads;
+    klee::findReads(condition, true, reads);
+    output << "{\"schema\":1,\"state\":" << state->getID() << ",\"pc\":" << pc
+           << ",\"dynamic\":" << (dynamic ? "true" : "false") << ",\"constraints\":" << state->constraints().size()
+           << ",\"truncated\":" << (reads.size() > 128 ? "true" : "false") << ",\"reads\":[";
+    bool first = true;
+    for (size_t i = 0; i < std::min(reads.size(), size_t(128)); ++i) {
+        const auto &read = reads[i];
+        const auto &array = read->getUpdates()->getRoot();
+        if (!first)
+            output << ',';
+        first = false;
+        // Hex encoding preserves even unusual guest names without letting
+        // control characters manufacture extra records in the native journal.
+        output << "{\"source_hex\":\"";
+        const char *digits = "0123456789abcdef";
+        for (unsigned char ch : array->getRawName())
+            output << digits[ch >> 4] << digits[ch & 15];
+        output << "\",\"size\":" << array->getSize() << ",\"index\":";
+        auto index = dyn_cast<klee::ConstantExpr>(read->getIndex());
+        if (index)
+            output << index->getZExtValue();
+        else
+            output << "null";
+        output << '}';
+    }
+    output << "]}\n";
+}
 
+void BehaviorSearcher::onStateForkObserve(S2EExecutionState *state, const klee::ref<klee::Expr> &condition,
+                                          bool &allowForking) {
+    // Observation must not disappear when another plugin vetoes a fork, and
+    // must never modify that veto. Decisions remain in onStateForkSelect.
+    if (!m_profileBranches || !condition) {
+        return;
+    }
+    uint64_t a, b;
+    if (!state->getCurrentStaticBranchTargets(&a, &b))
+        return;
+    auto module = m_detector->getCurrentDescriptor(state);
+    if (module && module->Name == m_moduleName) {
+        uint64_t nativePc;
+        if (module->ToNativeBase(state->regs()->getPc(), nativePc))
+            profileBranch(state, nativePc, condition);
+    } else if (m_regionMonitor && m_regionMonitor->isTrackedDynamicCode(state, state->regs()->getPc())) {
+        profileBranch(state, state->regs()->getPc(), condition, true);
+    }
+}
+
+void BehaviorSearcher::onStateForkSelect(S2EExecutionState *state, const klee::ref<klee::Expr> &condition,
+                                         CorePlugin::StateForkPreference &preference) {
+    if (preference != CorePlugin::StateForkPreference::NONE || !condition)
+        return;
     auto module = m_detector->getCurrentDescriptor(state);
     if (!module || module->Name != m_moduleName) {
         return;
@@ -329,6 +403,9 @@ void BehaviorSearcher::onStateForkSelect(S2EExecutionState *state, const klee::r
     if (!module->ToNativeBase(state->regs()->getPc(), nativeSource)) {
         return;
     }
+    // An absent CFG is unknown, not a proof of branch irrelevance.
+    if (!m_forkGateEnabled || m_distances.empty())
+        return;
     ++m_forkGateDecisions;
 
     struct SuccessorImpact {
@@ -370,7 +447,8 @@ void BehaviorSearcher::onStateForkSelect(S2EExecutionState *state, const klee::r
         anyMapped = true;
         impact.targetKey = getTargetKey(nativeTarget);
         impact.unsaturatedTarget =
-            impact.targetKey && m_reachedTargets.find(impact.targetKey) == m_reachedTargets.end();
+            impact.targetKey &&
+            (m_behaviorGoal != BehaviorGoal::None || m_reachedTargets.find(impact.targetKey) == m_reachedTargets.end());
         if (!impact.targetKey || impact.unsaturatedTarget) {
             impact.valuable = true;
             anyValuable = true;
@@ -393,6 +471,22 @@ void BehaviorSearcher::onStateForkSelect(S2EExecutionState *state, const klee::r
         ++m_forkGateDeniedCfg;
         getDebugStream(state) << "BehaviorSearcher: fork gate concretized branch " << hexval(nativeSource)
                               << " because both successors are avoided\n";
+        return;
+    }
+
+    // A reached callsite is a prerequisite, not semantic completion. Static
+    // distance maps commonly stop at allocation and omit the unpacked code.
+    // Preserve continuations while this state holds a live prerequisite;
+    // explicit avoid edges remain enforced by EdgeKiller. This conservative
+    // fallback is bounded by the normal state/run budgets, not random escape.
+    const unsigned stage = behaviorStage(state);
+    const auto trackedState = m_states.find(state);
+    const bool milestoneReached = trackedState != m_states.end() && trackedState->second.targetReached;
+    if (milestoneReached && stage && stage < behaviorGoalStages(m_behaviorGoal) && !impacts[0].avoided &&
+        !impacts[1].avoided) {
+        ++m_forkGateAllowed;
+        getInfoStream(state) << "BehaviorSearcher: semantic continuation goal=" << behaviorGoalName(m_behaviorGoal)
+                             << " stage=" << stage << " source=" << hexval(nativeSource) << "\n";
         return;
     }
 
@@ -475,7 +569,14 @@ bool BehaviorSearcher::isCoolingDown(const StateInfo &info) const {
     return info.cooldownUntilTick > m_timerTicks;
 }
 
-bool BehaviorSearcher::isTargetSaturated(const StateInfo &info) const {
+unsigned BehaviorSearcher::behaviorStage(S2EExecutionState *state) const {
+    return m_regionMonitor ? m_regionMonitor->behaviorStage(state, m_behaviorGoal) : 0;
+}
+
+bool BehaviorSearcher::isTargetSaturated(S2EExecutionState *state, const StateInfo &info) const {
+    if (m_behaviorGoal != BehaviorGoal::None) {
+        return behaviorStage(state) == behaviorGoalStages(m_behaviorGoal);
+    }
     if (info.frontierTargetKey) {
         return m_reachedTargets.find(info.frontierTargetKey) != m_reachedTargets.end();
     }
@@ -484,10 +585,10 @@ bool BehaviorSearcher::isTargetSaturated(const StateInfo &info) const {
 
 bool BehaviorSearcher::hasUnsaturatedAlternative(S2EExecutionState *current) const {
     for (const auto &entry : m_states) {
-        if (entry.first == current || isCoolingDown(entry.second) || isTargetSaturated(entry.second)) {
+        if (entry.first == current || isCoolingDown(entry.second) || isTargetSaturated(entry.first, entry.second)) {
             continue;
         }
-        if (effectiveDistance(entry.second) != UNREACHABLE) {
+        if (m_distances.empty() || effectiveDistance(entry.second) != UNREACHABLE || behaviorStage(entry.first)) {
             return true;
         }
     }
@@ -495,6 +596,9 @@ bool BehaviorSearcher::hasUnsaturatedAlternative(S2EExecutionState *current) con
 }
 
 double BehaviorSearcher::getCurrentEpsilon() const {
+    if (m_behaviorGoal != BehaviorGoal::None) {
+        return 0.0;
+    }
     if (m_plateauSeconds && m_timerTicks - m_lastGlobalProgressTick >= m_plateauSeconds) {
         return m_plateauEpsilon;
     }
@@ -519,10 +623,11 @@ bool BehaviorSearcher::hasRunnableAlternative(S2EExecutionState *current, uint64
             continue;
         }
         uint64_t distance = effectiveDistance(entry.second);
-        if (distance == UNREACHABLE) {
+        if (!m_distances.empty() && distance == UNREACHABLE && !behaviorStage(entry.first)) {
             continue;
         }
-        if (allowAnyDistance || currentDistance == UNREACHABLE || distance <= distanceLimit) {
+        if (allowAnyDistance || currentDistance == UNREACHABLE || distance <= distanceLimit ||
+            (behaviorStage(entry.first) && behaviorStage(entry.first) >= behaviorStage(current))) {
             return true;
         }
     }
@@ -533,19 +638,23 @@ bool BehaviorSearcher::isBetter(S2EExecutionState *candidate, const StateInfo &c
                                 S2EExecutionState *current, const StateInfo &currentInfo) const {
     uint64_t candidateDistance = effectiveDistance(candidateInfo);
     uint64_t currentDistance = effectiveDistance(currentInfo);
-    bool candidateReachable = candidateDistance != UNREACHABLE;
-    bool currentReachable = currentDistance != UNREACHABLE;
+    const unsigned candidateStage = behaviorStage(candidate);
+    const unsigned currentStage = behaviorStage(current);
+    bool candidateReachable = candidateDistance != UNREACHABLE || candidateStage;
+    bool currentReachable = currentDistance != UNREACHABLE || currentStage;
 
     // A target is an achievement, not a reason to monopolize the rest of the
     // objective. Prefer a reachable state that has not already achieved (or is
     // not about to revisit) a target, then use proximity. A direct successor
     // to an unseen zero-distance range remains best, so target acquisition is
     // never sacrificed for breadth.
-    return std::make_tuple(!candidateReachable, isCoolingDown(candidateInfo), isTargetSaturated(candidateInfo),
+    return std::make_tuple(!candidateReachable, isCoolingDown(candidateInfo),
+                           isTargetSaturated(candidate, candidateInfo), -static_cast<int>(candidateStage),
                            candidateDistance, -static_cast<int64_t>(candidateInfo.newBlocks),
                            candidate->constraints().size(), candidateInfo.selections, candidate->getID()) <
-           std::make_tuple(!currentReachable, isCoolingDown(currentInfo), isTargetSaturated(currentInfo),
-                           currentDistance, -static_cast<int64_t>(currentInfo.newBlocks), current->constraints().size(),
+           std::make_tuple(!currentReachable, isCoolingDown(currentInfo), isTargetSaturated(current, currentInfo),
+                           -static_cast<int>(currentStage), currentDistance,
+                           -static_cast<int64_t>(currentInfo.newBlocks), current->constraints().size(),
                            currentInfo.selections, current->getID());
 }
 
@@ -570,6 +679,15 @@ void BehaviorSearcher::onBlockExecute(S2EExecutionState *state, uint64_t pc, uin
     }
 
     StateInfo &info = it->second;
+    const unsigned stage = behaviorStage(state);
+    if (stage > info.behaviorStage) {
+        info.lastProgressTick = m_timerTicks;
+        m_lastGlobalProgressTick = m_timerTicks;
+        if (stage == behaviorGoalStages(m_behaviorGoal)) {
+            info.targetReachedTick = m_timerTicks;
+        }
+    }
+    info.behaviorStage = stage;
     uint64_t previousBest = info.bestDistance;
     info.distance = getDistance(nativePc);
     info.locationKnown = true;
@@ -710,8 +828,10 @@ void BehaviorSearcher::onTimer() {
     }
 
     uint64_t noProgressSeconds = m_timerTicks - current->second.lastProgressTick;
-    bool targetGraceExpired = m_targetGraceSeconds && current->second.targetReached &&
-                              m_timerTicks - current->second.targetReachedTick >= m_targetGraceSeconds;
+    const bool completed = m_behaviorGoal == BehaviorGoal::None ? current->second.targetReached
+                                                                : isTargetSaturated(m_currentState, current->second);
+    bool targetGraceExpired =
+        m_targetGraceSeconds && completed && m_timerTicks - current->second.targetReachedTick >= m_targetGraceSeconds;
     bool hardStalled = m_hardStallSeconds && noProgressSeconds >= m_hardStallSeconds;
     bool stalled = m_maxStallSeconds && noProgressSeconds >= m_maxStallSeconds;
     bool quantumExpired = m_quantumSeconds && m_timerTicks - m_selectedAtTick >= m_quantumSeconds;
@@ -805,7 +925,7 @@ klee::ExecutionState &BehaviorSearcher::selectState() {
                 if (distance == UNREACHABLE || (isCoolingDown(it->second) && !isCoolingDown(best->second))) {
                     continue;
                 }
-                if (isTargetSaturated(it->second) && !isTargetSaturated(best->second)) {
+                if (isTargetSaturated(it->first, it->second) && !isTargetSaturated(best->first, best->second)) {
                     continue;
                 }
                 if (bestDistance == UNREACHABLE || distance <= distanceLimit) {
@@ -831,7 +951,8 @@ klee::ExecutionState &BehaviorSearcher::selectState() {
         getDebugStream(best->first) << "BehaviorSearcher: selected state " << best->first->getID()
                                     << " distance=" << effectiveDistance(best->second)
                                     << " newBlocks=" << best->second.newBlocks
-                                    << " targetSaturated=" << isTargetSaturated(best->second)
+                                    << " targetSaturated=" << isTargetSaturated(best->first, best->second)
+                                    << " behaviorStage=" << behaviorStage(best->first)
                                     << " constraints=" << best->first->constraints().size() << "\n";
         m_lastSelected = best->first;
     }

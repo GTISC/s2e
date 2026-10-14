@@ -95,6 +95,11 @@ cl::opt<bool> UseCache("use-cache", cl::init(true), cl::desc("Use validity cachi
 cl::opt<bool> UseIndependentSolver("use-independent-solver", cl::init(true), cl::desc("Use constraint independence"));
 
 cl::opt<bool> DebugValidateSolver("debug-validate-solver", cl::init(false));
+
+// Opt-in during evaluation: cross-check reduced queries against full queries.
+// IndependentSolver keeps concolic model generation full-width.
+cl::opt<bool> S2EIndependentQueries("s2e-independent-queries", cl::init(false),
+                                    cl::desc("Validate independent non-incremental Z3 queries against full queries"));
 } // namespace
 
 namespace klee {
@@ -129,6 +134,9 @@ SolverPtr DefaultSolverFactory::createEndSolver() {
 
 SolverPtr DefaultSolverFactory::decorateSolver(SolverPtr &end_solver) {
     SolverPtr solver = end_solver;
+    if (S2EIndependentQueries && (SolverIncrementality != INCREMENTAL_NONE || !UseIndependentSolver)) {
+        pabort("s2e-independent-queries requires non-incremental solving and use-independent-solver");
+    }
 
     if (queryLoggingOptions.isSet(SOLVER_KQUERY)) {
         solver =
@@ -153,11 +161,11 @@ SolverPtr DefaultSolverFactory::decorateSolver(SolverPtr &end_solver) {
 
     // FIXME: The check should be more generic (e.g., enable only for
     // non-incremental solvers)
-    if (UseIndependentSolver && (EndSolver != SOLVER_Z3)) {
+    if (UseIndependentSolver && (EndSolver != SOLVER_Z3 || S2EIndependentQueries)) {
         solver = createIndependentSolver(solver);
     }
 
-    if (DebugValidateSolver) {
+    if (DebugValidateSolver || S2EIndependentQueries) {
         solver = createValidatingSolver(solver, end_solver);
     }
 

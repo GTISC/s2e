@@ -5,6 +5,7 @@
 #include "ExecutableRegionMonitor.h"
 
 #include <s2e/ConfigFile.h>
+#include <s2e/Plugins/ExecutionTracers/TestCaseGenerator.h>
 #include <s2e/S2E.h>
 #include <s2e/S2EExecutionState.h>
 #include <s2e/Utils.h>
@@ -18,12 +19,14 @@
 
 #include <algorithm>
 #include <cctype>
+#include <chrono>
 #include <cstdint>
 #include <fstream>
 #include <limits>
 #include <map>
 #include <set>
 #include <sstream>
+#include <tuple>
 #include <vector>
 
 namespace s2e {
@@ -47,6 +50,8 @@ struct ExecutableRegionCommand {
 };
 
 struct ExecutableRegion {
+    uint64_t allocationId = 0;
+    uint64_t budgetBase = 0;
     uint64_t pid = 0;
     uint64_t sourcePid = 0;
     uint64_t start = 0;
@@ -60,18 +65,25 @@ struct ExecutableRegion {
 };
 
 struct DescendantProcess {
+    uint64_t lifetime = 0;
+    uint64_t parentLifetime = 0;
     uint64_t parentPid = 0;
     uint64_t depth = 0;
     std::string imageName;
+    bool diagnostic = false;
 };
 
 class ExecutableRegionMonitorState : public PluginState {
 public:
+    BehaviorOracle oracle;
     std::vector<ExecutableRegion> regions;
     std::set<uint64_t> armedPids;
     std::set<uint64_t> readyPids;
     std::map<uint64_t, std::set<uint64_t>> trustedThreads;
     std::map<uint64_t, DescendantProcess> descendants;
+    // Include state ID in keys: cloned states must retain their own evidence.
+    std::set<std::tuple<uint64_t, uint64_t, uint64_t>> coverageActivations;
+    std::set<std::tuple<uint64_t, uint64_t, uint64_t, uint64_t, std::string>> coverageBlocks;
 
     static PluginState *factory(Plugin *plugin, S2EExecutionState *state) {
         return new ExecutableRegionMonitorState();
@@ -134,6 +146,84 @@ static bool isTrustedThread(const ExecutableRegionMonitorState *state, uint64_t 
 
 } // namespace
 
+void ExecutableRegionMonitor::recordChild(S2EExecutionState *state, const char *event, uint64_t pid, uint64_t pc) {
+    DECLARE_PLUGINSTATE(ExecutableRegionMonitorState, state);
+    const auto &child = plgState->descendants.at(pid);
+    // Hex encodes arbitrary image-name bytes without trusting them as JSON syntax.
+    std::string encoded;
+    for (unsigned char c : child.imageName) {
+        encoded += "0123456789abcdef"[c >> 4];
+        encoded += "0123456789abcdef"[c & 15];
+    }
+    std::ofstream out(s2e()->getOutputFilename("child-processes.jsonl"), std::ios::app);
+    out << "{\"schema\":1,\"event\":\"" << event << "\",\"instance\":" << s2e()->getCurrentInstanceIndex()
+        << ",\"time_ns\":"
+        << std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch())
+               .count()
+        << ",\"state\":" << state->getID() << ",\"pid\":" << pid << ",\"lifetime\":" << child.lifetime
+        << ",\"parent_pid\":" << child.parentPid << ",\"parent_lifetime\":" << child.parentLifetime
+        << ",\"depth\":" << child.depth << ",\"image_hex\":\"" << encoded << "\",\"pc\":" << pc
+        << ",\"diagnostic_lineage\":" << (child.diagnostic ? "true" : "false") << "}\n";
+    out.close();
+    if (!out) {
+        getWarningsStream(state) << "ExecutableRegionMonitor: could not persist child evidence\n";
+    } else if (!child.diagnostic) {
+        auto controller = s2e()->getPlugin<testcases::TestCaseGenerator>();
+        if (controller && std::string(event) == "activated-injected")
+            controller->explorationProgress(state, pid, child.depth, "injected_execution", true);
+        else if (controller && std::string(event) == "activated-image")
+            controller->explorationProgress(state, pid, child.depth, "child_activation", false);
+    }
+}
+
+unsigned ExecutableRegionMonitor::behaviorStage(S2EExecutionState *state, BehaviorGoal goal) {
+    DECLARE_PLUGINSTATE(ExecutableRegionMonitorState, state);
+    return plgState->oracle.stage(goal);
+}
+
+bool ExecutableRegionMonitor::getProcessContext(S2EExecutionState *state, uint64_t &pid, uint64_t &lifetime,
+                                                uint64_t &depth, bool &diagnostic) {
+    DECLARE_PLUGINSTATE(ExecutableRegionMonitorState, state);
+    pid = m_windows->getCurrentProcessId(state);
+    if (!plgState->armedPids.count(pid) ||
+        (m_requireInstrumentationReady && !isTrustedThread(plgState, pid, m_windows->getCurrentThreadId(state)))) {
+        return false;
+    }
+    lifetime = depth = 0;
+    diagnostic = false;
+    auto child = plgState->descendants.find(pid);
+    if (child != plgState->descendants.end()) {
+        lifetime = child->second.lifetime;
+        depth = child->second.depth;
+        diagnostic = child->second.diagnostic;
+    }
+    return true;
+}
+
+bool ExecutableRegionMonitor::isTrackedDynamicCode(S2EExecutionState *state, uint64_t pc) {
+    uint64_t pid, allocation, offset;
+    return getDynamicCodeLocation(state, pc, pid, allocation, offset);
+}
+
+bool ExecutableRegionMonitor::getDynamicCodeLocation(S2EExecutionState *state, uint64_t pc, uint64_t &pid,
+                                                     uint64_t &allocation, uint64_t &offset) {
+    DECLARE_PLUGINSTATE(ExecutableRegionMonitorState, state);
+    pid = m_windows->getCurrentProcessId(state);
+    if (m_requireInstrumentationReady && !isTrustedThread(plgState, pid, m_windows->getCurrentThreadId(state))) {
+        return false;
+    }
+    if (m_modules->getModule(state, pid, pc))
+        return false;
+    for (const auto &region : plgState->regions) {
+        if (region.executed && region.pid == pid && region.start <= pc && pc < region.end) {
+            allocation = region.allocationId;
+            offset = pc - region.budgetBase;
+            return true;
+        }
+    }
+    return false;
+}
+
 void ExecutableRegionMonitor::initialize() {
     m_windows = dynamic_cast<WindowsMonitor *>(s2e()->getPlugin("OSMonitor"));
     if (!m_windows) {
@@ -163,6 +253,11 @@ void ExecutableRegionMonitor::initialize() {
     m_requireInstrumentationReady = cfg->getBool(getConfigKey() + ".requireInstrumentationReady", false, &ok);
     if (!ok) {
         getWarningsStream() << "ExecutableRegionMonitor: requireInstrumentationReady must be a boolean\n";
+        exit(-1);
+    }
+    m_recordExecutionCoverage = cfg->getBool(getConfigKey() + ".recordExecutionCoverage", false, &ok);
+    if (!ok) {
+        getWarningsStream() << "ExecutableRegionMonitor: recordExecutionCoverage must be a boolean\n";
         exit(-1);
     }
 
@@ -209,7 +304,8 @@ void ExecutableRegionMonitor::initialize() {
                     << " dumpOnExecute=" << m_dumpOnExecute << " maxDumpBytes=" << m_maxDumpBytes
                     << " trackChildProcesses=" << m_trackChildProcesses << " maxChildDepth=" << m_maxChildDepth
                     << " maxChildren=" << m_maxChildren
-                    << " requireInstrumentationReady=" << m_requireInstrumentationReady << "\n";
+                    << " requireInstrumentationReady=" << m_requireInstrumentationReady
+                    << " recordExecutionCoverage=" << m_recordExecutionCoverage << "\n";
 }
 
 void ExecutableRegionMonitor::handleOpcodeInvocation(S2EExecutionState *state, uint64_t guestDataPtr,
@@ -239,6 +335,8 @@ void ExecutableRegionMonitor::handleOpcodeInvocation(S2EExecutionState *state, u
     // that predate this boundary, including EasyHook's loader, stay untrusted.
     plgState->readyPids.insert(request.pid);
     plgState->trustedThreads[request.pid].insert(request.tid);
+    auto controller = s2e()->getPlugin<testcases::TestCaseGenerator>();
+    if (controller) controller->explorationReady(state, request.pid);
     getInfoStream(state) << "ExecutableRegionMonitor: instrumentationReady sourcePid="
                          << hexval(m_windows->getCurrentProcessId(state))
                          << " sourceTid=" << hexval(m_windows->getCurrentThreadId(state))
@@ -291,6 +389,8 @@ void ExecutableRegionMonitor::onNtAllocateVirtualMemory(S2EExecutionState *state
     uint64_t end = exclusiveEnd(start, data.Size);
 
     ExecutableRegion region;
+    region.allocationId = m_nextAllocationId++;
+    region.budgetBase = start;
     region.pid = pid;
     region.sourcePid = sourcePid;
     region.start = start;
@@ -310,6 +410,12 @@ void ExecutableRegionMonitor::onNtAllocateVirtualMemory(S2EExecutionState *state
         }
         region.start = std::min(region.start, it->start);
         region.end = std::max(region.end, it->end);
+        // Reserve/commit overlap is the same lifetime, not a fresh budget.
+        // Keep the origin stable even when the tracked interval expands.
+        if (it->allocationId < region.allocationId) {
+            region.allocationId = it->allocationId;
+            region.budgetBase = it->budgetBase;
+        }
         region.everWritable = region.everWritable || it->everWritable;
         region.executed = region.executed || it->executed;
         region.dumped = region.dumped || it->dumped;
@@ -322,6 +428,7 @@ void ExecutableRegionMonitor::onNtAllocateVirtualMemory(S2EExecutionState *state
                                  << "\n";
     }
     plgState->regions.push_back(region);
+    plgState->oracle.allocated(sourcePid, pid, start, end, m_maxRegions);
 
     getInfoStream(state) << "ExecutableRegionMonitor: effect=" << (remote ? "VirtualAllocEx" : "VirtualAlloc")
                          << " native=NtAllocateVirtualMemory sourcePid=" << hexval(sourcePid) << " pid=" << hexval(pid)
@@ -403,6 +510,7 @@ void ExecutableRegionMonitor::onNtFreeVirtualMemory(S2EExecutionState *state, co
     if (m_requireInstrumentationReady && !isTrustedThread(plgState, sourcePid, m_windows->getCurrentThreadId(state))) {
         return;
     }
+    plgState->oracle.freed(pid, data.BaseAddress, data.Size ? end : data.BaseAddress);
     plgState->regions.erase(std::remove_if(plgState->regions.begin(), plgState->regions.end(),
                                            [&](const ExecutableRegion &region) {
                                                if (region.pid != pid) {
@@ -447,7 +555,14 @@ void ExecutableRegionMonitor::onBlockExecute(S2EExecutionState *state, uint64_t 
                 }
             }
             plgState->armedPids.insert(pid);
+            DescendantProcess root;
+            root.lifetime = m_nextProcessId++;
+            root.parentPid = m_windows->getProcessParent(state, pid);
+            root.imageName = lowerCase(module->Name);
+            plgState->descendants[pid] = root;
+            recordChild(state, "activated-image", pid, pc);
             plgState->trustedThreads[pid].insert(m_windows->getCurrentThreadId(state));
+            recordChild(state, injectedExecution ? "activated-injected" : "activated-image", pid, pc);
             getInfoStream(state) << "ExecutableRegionMonitor: childActivated parentPid="
                                  << hexval(descendant->second.parentPid) << " pid=" << hexval(pid)
                                  << " image=" << descendant->second.imageName << " depth=" << descendant->second.depth
@@ -470,6 +585,10 @@ void ExecutableRegionMonitor::onBlockExecute(S2EExecutionState *state, uint64_t 
     uint64_t tid = m_windows->getCurrentThreadId(state);
     if (m_requireInstrumentationReady && !isTrustedThread(plgState, pid, tid)) {
         return;
+    }
+
+    if (m_recordExecutionCoverage) {
+        recordExecutionCoverage(state, pid, pc);
     }
 
     if (plgState->regions.empty()) {
@@ -499,6 +618,32 @@ void ExecutableRegionMonitor::onBlockExecute(S2EExecutionState *state, uint64_t 
                          << " pid=" << hexval(pid) << " pc=" << hexval(pc) << " base=" << hexval(it->start)
                          << " size=" << hexval(it->end - it->start) << " protection=" << hexval(it->protection)
                          << " remote=" << it->remote << "\n";
+
+    const unsigned previousStages[] = {plgState->oracle.stage(BehaviorGoal::AllocatedCodeExecution),
+                                       plgState->oracle.stage(BehaviorGoal::ChildRemoteExecution)};
+    plgState->oracle.executed(it->sourcePid, pid, pc);
+    unsigned goalIndex = 0;
+    for (auto goal : {BehaviorGoal::AllocatedCodeExecution, BehaviorGoal::ChildRemoteExecution}) {
+        if (previousStages[goalIndex++] != behaviorGoalStages(goal) &&
+            plgState->oracle.stage(goal) == behaviorGoalStages(goal)) {
+            getInfoStream(state) << "BehaviorOracle: completed=" << behaviorGoalName(goal)
+                                 << " state=" << state->getID() << " sourcePid=" << hexval(it->sourcePid)
+                                 << " pid=" << hexval(pid) << " base=" << hexval(it->start) << " pc=" << hexval(pc)
+                                 << "\n";
+            // A native-only journal is the acceptance authority. Guest log
+            // messages can contain arbitrary strings, including fake oracle
+            // lines, and must never certify a completion contract.
+            std::ofstream witness(s2e()->getOutputFilename("behavior-witnesses.jsonl"), std::ios::app);
+            witness << "{\"schema\":1,\"goal\":\"" << behaviorGoalName(goal)
+                    << "\",\"instance\":" << s2e()->getCurrentInstanceIndex() << ",\"state\":" << state->getID()
+                    << ",\"source_pid\":" << it->sourcePid << ",\"pid\":" << pid << ",\"base\":" << it->start
+                    << ",\"end\":" << it->end << ",\"pc\":" << pc << "}\n";
+            witness.flush();
+            if (!witness) {
+                getWarningsStream(state) << "BehaviorOracle: could not persist completion witness\n";
+            }
+        }
+    }
 
     if (!m_dumpOnExecute || !m_maxDumpBytes || it->dumped) {
         return;
@@ -561,6 +706,60 @@ void ExecutableRegionMonitor::onBlockExecute(S2EExecutionState *state, uint64_t 
     getInfoStream(state) << "ExecutableRegionMonitor: dump=" << filename.str() << " bytes=" << dumpSize << "\n";
 }
 
+void ExecutableRegionMonitor::recordExecutionCoverage(S2EExecutionState *state, uint64_t pid, uint64_t pc) {
+    DECLARE_PLUGINSTATE(ExecutableRegionMonitorState, state);
+    const auto process = plgState->descendants.find(pid);
+    if (process == plgState->descendants.end() || process->second.diagnostic ||
+        plgState->coverageBlocks.size() >= 100000) {
+        return;
+    }
+    const auto module = m_modules->getModule(state, pid, pc);
+    const auto tb = state->getTb();
+    // Admit only the tracked main image, never its libraries or tooling. Bound
+    // reads to the measured module and TB; unreadable/symbolic code is omitted.
+    if (!module || lowerCase(module->Name) != process->second.imageName || !tb || tb->pc != pc ||
+        !tb->size || tb->size > 4096 || pc < module->LoadBase ||
+        pc - module->LoadBase >= module->Size || tb->size > module->Size - (pc - module->LoadBase)) {
+        return;
+    }
+    std::string code;
+    for (uint64_t i = 0; i < tb->size; ++i) {
+        const auto value = state->mem()->read(pc + i, klee::Expr::Int8);
+        const auto constant = dyn_cast_or_null<klee::ConstantExpr>(value);
+        if (!constant) return;
+        const auto byte = constant->getZExtValue();
+        code += "0123456789abcdef"[byte >> 4];
+        code += "0123456789abcdef"[byte & 15];
+    }
+    const auto &owner = process->second;
+    const auto key = std::make_tuple(state->getID(), pid, owner.lifetime, pc, code);
+    if (plgState->coverageBlocks.count(key)) return;
+    const auto activation = std::make_tuple(state->getID(), pid, owner.lifetime);
+    if (plgState->coverageActivations.insert(activation).second) {
+        recordChild(state, "activated-image", pid, pc);
+    }
+    std::string image;
+    for (unsigned char c : owner.imageName) {
+        image += "0123456789abcdef"[c >> 4];
+        image += "0123456789abcdef"[c & 15];
+    }
+    std::ofstream out(s2e()->getOutputFilename("execution-coverage.jsonl"), std::ios::app);
+    out << "{\"schema\":1,\"instance\":" << s2e()->getCurrentInstanceIndex()
+        << ",\"state\":" << state->getID() << ",\"pid\":" << pid << ",\"lifetime\":" << owner.lifetime
+        << ",\"tid\":" << m_windows->getCurrentThreadId(state) << ",\"depth\":" << owner.depth
+        << ",\"time_ns\":"
+        << std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count()
+        << ",\"kind\":\"image\",\"base\":" << module->LoadBase << ",\"region_size\":" << module->Size
+        << ",\"offset\":" << pc - module->LoadBase << ",\"image_hex\":\"" << image
+        << "\",\"code_hex\":\"" << code << "\",\"capped\":false}\n";
+    out.close();
+    if (!out) {
+        getWarningsStream(state) << "ExecutableRegionMonitor: could not persist execution coverage\n";
+        return;
+    }
+    plgState->coverageBlocks.insert(key);
+}
+
 void ExecutableRegionMonitor::onProcessLoad(S2EExecutionState *state, uint64_t pageDir, uint64_t pid,
                                             const std::string &imageName) {
     if (!m_trackChildProcesses || !pid) {
@@ -591,10 +790,19 @@ void ExecutableRegionMonitor::onProcessLoad(S2EExecutionState *state, uint64_t p
     }
 
     DescendantProcess child;
+    child.lifetime = m_nextProcessId++;
     child.parentPid = parentPid;
     child.depth = depth;
     child.imageName = lowerCase(imageName);
+    child.diagnostic =
+        child.imageName == "werfault.exe" || child.imageName == "wermgr.exe" || child.imageName == "drvctl.exe";
+    if (parent != plgState->descendants.end()) {
+        child.parentLifetime = parent->second.lifetime;
+        child.diagnostic |= parent->second.diagnostic;
+    }
     plgState->descendants[pid] = child;
+    recordChild(state, "created", pid);
+    plgState->oracle.childCreated(parentPid, pid);
     plgState->armedPids.erase(pid);
 
     // Keeping the PID in ProcessExecutionDetector ensures the analysis does
@@ -608,6 +816,10 @@ void ExecutableRegionMonitor::onProcessLoad(S2EExecutionState *state, uint64_t p
 void ExecutableRegionMonitor::onProcessUnload(S2EExecutionState *state, uint64_t pageDir, uint64_t pid,
                                               uint64_t returnCode) {
     DECLARE_PLUGINSTATE(ExecutableRegionMonitorState, state);
+    if (plgState->descendants.count(pid)) {
+        recordChild(state, "exited", pid);
+    }
+    plgState->oracle.processExited(pid);
     plgState->regions.erase(std::remove_if(plgState->regions.begin(), plgState->regions.end(),
                                            [&](const ExecutableRegion &region) { return region.pid == pid; }),
                             plgState->regions.end());

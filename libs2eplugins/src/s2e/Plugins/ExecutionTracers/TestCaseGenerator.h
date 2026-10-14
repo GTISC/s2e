@@ -25,8 +25,10 @@
 #define S2E_PLUGINS_TCGEN_H
 
 #include <string>
+#include <chrono>
 #include <unordered_map>
 #include <vector>
+#include "ExplorationBudget.h"
 
 #include <llvm/Support/raw_ostream.h>
 
@@ -184,6 +186,22 @@ class TestCaseGenerator : public Plugin, public IPluginInvoker {
     S2E_PLUGIN
 
 private:
+    ExplorationBudget m_explorationBudget;
+    std::string m_budgetMode = "off";
+    std::string m_deadlineReason = "analysis deadline (testcases flushed)";
+    std::chrono::steady_clock::time_point m_budgetStarted;
+    uint64_t m_budgetStartupSeconds = 120;
+    uint64_t m_budgetLastHeartbeat = 0;
+    uint64_t budgetElapsed() const;
+    void budgetJournal(const char *event, S2EExecutionState *state = nullptr, uint64_t pid = 0,
+                       uint64_t depth = 0, const std::string &key = "", bool strong = false);
+
+public:
+    void explorationReady(S2EExecutionState *state, uint64_t pid);
+    void explorationProgress(S2EExecutionState *state, uint64_t pid, uint64_t depth,
+                             const std::string &kind, bool strong);
+
+private:
     typedef std::pair<std::string, std::vector<unsigned char>> VarValuePair;
     typedef std::vector<VarValuePair> ConcreteInputs;
 
@@ -246,6 +264,13 @@ public:
 
 private:
     sigc::connection m_stateForkConnection;
+    sigc::connection m_deadlineConnection;
+    sigc::connection m_deadlineTranslateConnection;
+    uint64_t m_terminateAfterSeconds = 0;
+    std::chrono::steady_clock::time_point m_started;
+    void onDeadline();
+    void onDeadlineTranslate(ExecutionSignal *signal, S2EExecutionState *state, TranslationBlock *tb, uint64_t pc);
+    void onDeadlineExecute(S2EExecutionState *state, uint64_t pc);
     sigc::connection m_stateKillConnection;
     sigc::connection m_linuxSegFaultConnection;
     sigc::connection m_windowsUserCrashConnection;

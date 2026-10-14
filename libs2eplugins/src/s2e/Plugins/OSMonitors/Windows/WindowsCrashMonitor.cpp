@@ -25,6 +25,8 @@
 #include <s2e/S2EExecutor.h>
 #include <s2e/Utils.h>
 
+#include <chrono>
+#include <fstream>
 #include <iostream>
 #include <sstream>
 
@@ -108,7 +110,7 @@ void WindowsCrashMonitor::onBlueScreen(S2EExecutionState *state, vmi::windows::B
 
 void WindowsCrashMonitor::opUserModeCrash(S2EExecutionState *state, uint64_t guestDataPtr,
                                           const S2E_WINDOWS_CRASH_COMMAND &command) {
-    WindowsUserModeCrash crash;
+    WindowsUserModeCrash crash = {};
     crash.Pid = command.UserModeCrash.Pid;
     crash.ExceptionCode = command.UserModeCrash.ExceptionCode;
     crash.ExceptionAddress = command.UserModeCrash.ExceptionAddress;
@@ -118,15 +120,28 @@ void WindowsCrashMonitor::opUserModeCrash(S2EExecutionState *state, uint64_t gue
     ret &= state->mem()->readString(command.UserModeCrash.ProgramName, crash.ProgramName);
     if (!ret) {
         getWarningsStream(state) << "could not read program name\n";
-        return;
+        crash.ProgramName = "<unreadable>";
     }
 
+    // Notifications and crash evidence must not depend on expensive dump generation.
+    // Numeric fields come from the crash command, never from arbitrary guest log text.
+    std::ofstream journal(s2e()->getOutputFilename("user-crashes.jsonl"), std::ios::app);
+    journal << "{\"schema\":1,\"instance\":" << s2e()->getCurrentInstanceIndex() << ",\"time_ns\":"
+            << std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch())
+                   .count()
+            << ",\"state\":" << state->getID() << ",\"pid\":" << crash.Pid
+            << ",\"exception_code\":" << crash.ExceptionCode << ",\"pc\":" << crash.ExceptionAddress
+            << ",\"terminate_state\":" << (m_terminateOnCrash ? "true" : "false") << "}\n";
+    journal.close();
+    if (!journal) {
+        getWarningsStream(state) << "Could not persist user crash evidence\n";
+    }
     if (m_generateDumpOnUserCrash) {
         crash.CrashDumpHeader.Buffer = command.Dump.Buffer;
         crash.CrashDumpHeader.Size = command.Dump.Size;
-
-        onUserModeCrash.emit(state, crash);
-
+    }
+    onUserModeCrash.emit(state, crash);
+    if (m_generateDumpOnUserCrash) {
         vmi::windows::BugCheckDescription info;
         info.guestHeader = crash.CrashDumpHeader.Buffer;
         info.headerSize = crash.CrashDumpHeader.Size;
