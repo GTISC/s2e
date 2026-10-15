@@ -179,11 +179,11 @@ void FunctionCallLogger::modelSelectedInput(S2EExecutionState *state, const Obse
             auto domain = klee::AndExpr::create(klee::UleExpr::create(klee::ConstantExpr::create(32,klee::Expr::Int8),symbols[i]),
                           klee::UleExpr::create(symbols[i],klee::ConstantExpr::create(126,klee::Expr::Int8)));
             if (!state->addConstraint(domain)) {
-                s2e()->getExecutor()->terminateStateEarly(*state, "Selected input domain was infeasible"); return;
+                s2e()->getExecutor()->terminateState(*state, "Selected input domain was infeasible"); return;
             }
         }
         if (!state->mem()->write(buffer + policy.offsets[i], symbols[i])) {
-            s2e()->getExecutor()->terminateStateEarly(*state, "Selected input write failed"); return;
+            s2e()->getExecutor()->terminateState(*state, "Selected input write failed"); return;
         }
     }
     ++m_modeledInputs;
@@ -196,7 +196,7 @@ void FunctionCallLogger::modelSelectedInput(S2EExecutionState *state, const Obse
         << ",\"read_index\":" << ordinal << ",\"byte_offsets\":[";
     for (size_t i=0;i<policy.offsets.size();++i) { if(i) out << ',';out << policy.offsets[i]; }
     out << "]}\n";out.close();
-    if (!out) s2e()->getExecutor()->terminateStateEarly(*state, "Selected input journal write failed");
+    if (!out) s2e()->getExecutor()->terminateState(*state, "Selected input journal write failed");
 }
 
 void FunctionCallLogger::enableInputJournal() {
