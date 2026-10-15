@@ -1,2 +1,2 @@
-add_klee_unit_test(SolverTest IndependentSolverTest.cpp)
+add_klee_unit_test(SolverTest IndependentSolverTest.cpp ConcolicSliceTest.cpp)
 target_link_libraries(SolverTest PRIVATE kleaverSolver kleaverExpr kleeSupport kleeBasic gomp)

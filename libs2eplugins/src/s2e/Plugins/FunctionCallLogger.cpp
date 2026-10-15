@@ -30,6 +30,7 @@
 #include <s2e/Plugins/Core/Vmi.h>
 #include <s2e/Plugins/ExecutionTracers/TestCaseGenerator.h>
 #include <s2e/S2E.h>
+#include <s2e/S2EExecutor.h>
 #include <s2e/cpu.h>
 #include <tuple>
 
@@ -56,6 +57,7 @@ class FunctionCallLoggerState : public PluginState {
 public:
     std::map<std::tuple<uint64_t, uint64_t, uint32_t>, std::string> fileHandles, registryHandles;
     uint64_t events = 0;
+    std::map<std::pair<uint64_t,uint64_t>, unsigned> selectedReads;
     static PluginState *factory(Plugin *p, S2EExecutionState *s) {
         return new FunctionCallLoggerState();
     }
@@ -79,6 +81,7 @@ void FunctionCallLogger::initialize() {
     m_observeWindowsEffects = s2e()->getConfig()->getBool(getConfigKey() + ".observeWindowsEffects", false);
     m_discoverRootInputs = s2e()->getConfig()->getBool(getConfigKey() + ".discoverRootInputs", false);
     m_discoverChildInputs = s2e()->getConfig()->getBool(getConfigKey() + ".discoverChildInputs", false);
+    parseSelectedInput();
     m_regions = s2e()->getPlugin<ExecutableRegionMonitor>();
     m_vmi = s2e()->getPlugin<Vmi>();
     const bool observe = m_observeWindowsEffects || m_discoverRootInputs || m_discoverChildInputs;
@@ -116,6 +119,84 @@ static std::string inputHex(const std::string &bytes) {
         result += "0123456789abcdef"[c & 15];
     }
     return result;
+}
+
+void FunctionCallLogger::parseSelectedInput() {
+    auto cfg = s2e()->getConfig();
+    const std::string key = getConfigKey() + ".selectedCompletedInput";
+    if (!cfg->hasKey(key)) return;
+    bool ok;
+    auto fail = [&]() { getWarningsStream() << "Invalid selectedCompletedInput policy\n"; exit(-1); };
+    auto text = [&](const char *field) {
+        auto value = cfg->getString(key + "." + field, "", &ok);
+        if (!ok) fail();
+        return value;
+    };
+    m_selectedInput.api = text("api"); m_selectedInput.path = text("path");
+    m_selectedInput.value = text("value"); m_selectedInput.scope = text("scope");
+    const auto seedHex = text("seed_hex");
+    if (seedHex.empty() || seedHex.size() > 512 || seedHex.size() % 2) fail();
+    auto digit = [&](char c) -> unsigned {
+        if (c >= '0' && c <= '9') return c - '0';
+        if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+        fail(); return 0;
+    };
+    for (size_t i = 0; i < seedHex.size(); i += 2)
+        m_selectedInput.seed += char(digit(seedHex[i])*16 + digit(seedHex[i+1]));
+    auto ordinal = cfg->getInt(key + ".read_index", 1, &ok);
+    if (!ok || ordinal < 1 || ordinal > 8) fail();
+    m_selectedInput.readIndex = ordinal;
+    int count = cfg->getListSize(key + ".byte_offsets", &ok);
+    if (!ok || count < 1 || count > 16) fail();
+    for (int i = 1; i <= count; ++i) {
+        auto offset = cfg->getInt(key + ".byte_offsets[" + std::to_string(i) + "]", -1, &ok);
+        if (!ok || offset < 0 || offset > 255) fail();
+        m_selectedInput.offsets.push_back(offset);
+    }
+    if (!m_selectedInput.valid() ||
+        (m_selectedInput.scope == "root" ? !m_discoverRootInputs : !m_discoverChildInputs)) fail();
+    m_selectedInput.enabled = true;
+}
+
+void FunctionCallLogger::modelSelectedInput(S2EExecutionState *state, const ObservedWindowsCall &call,
+                                           uint64_t buffer, const std::string &seed, unsigned registryType,
+                                           uint64_t time) {
+    const auto &policy = m_selectedInput;
+    if (!policy.enabled || m_modeledInputs >= 64 || call.api != policy.api || call.path != policy.path ||
+        call.value != policy.value || (call.depth == 0) != (policy.scope == "root")) return;
+    DECLARE_PLUGINSTATE(FunctionCallLoggerState, state);
+    auto &ordinal = plgState->selectedReads[std::make_pair(call.pid, call.lifetime)];
+    if (++ordinal != policy.readIndex || !policy.accepts(seed, registryType)) return;
+    // Only selected bytes become symbolic. Every other byte, API status,
+    // length, UTF-16 high byte and terminator retains its actual concrete value.
+    std::vector<uint8_t> bytes;
+    for (unsigned offset : policy.offsets) bytes.push_back(seed[offset]);
+    std::string arrayName;
+    auto symbols = state->createSymbolicArray(call.api + "_selected", bytes.size(), bytes, &arrayName);
+    const bool text = call.api != "ReadFile" && !(call.api.find("Reg") == 0 && registryType == 4);
+    for (size_t i = 0; i < symbols.size(); ++i) {
+        if (text) {
+            auto domain = klee::AndExpr::create(klee::UleExpr::create(klee::ConstantExpr::create(32,klee::Expr::Int8),symbols[i]),
+                          klee::UleExpr::create(symbols[i],klee::ConstantExpr::create(126,klee::Expr::Int8)));
+            if (!state->addConstraint(domain)) {
+                s2e()->getExecutor()->terminateStateEarly(*state, "Selected input domain was infeasible"); return;
+            }
+        }
+        if (!state->mem()->write(buffer + policy.offsets[i], symbols[i])) {
+            s2e()->getExecutor()->terminateStateEarly(*state, "Selected input write failed"); return;
+        }
+    }
+    ++m_modeledInputs;
+    std::ofstream out(s2e()->getOutputFilename("selected-inputs.jsonl"), std::ios::app);
+    out << "{\"schema\":1,\"instance\":" << s2e()->getCurrentInstanceIndex() << ",\"state\":" << state->getID()
+        << ",\"pid\":" << call.pid << ",\"lifetime\":" << call.lifetime << ",\"depth\":" << call.depth
+        << ",\"time_ns\":" << time << ",\"api\":\"" << call.api << "\",\"path_hex\":\"" << inputHex(call.path)
+        << "\",\"value_hex\":\"" << inputHex(call.value) << "\",\"seed_hex\":\"" << inputHex(seed)
+        << "\",\"array_hex\":\"" << inputHex(arrayName) << "\",\"registry_type\":" << registryType
+        << ",\"read_index\":" << ordinal << ",\"byte_offsets\":[";
+    for (size_t i=0;i<policy.offsets.size();++i) { if(i) out << ',';out << policy.offsets[i]; }
+    out << "]}\n";out.close();
+    if (!out) s2e()->getExecutor()->terminateStateEarly(*state, "Selected input journal write failed");
 }
 
 void FunctionCallLogger::enableInputJournal() {
@@ -178,16 +259,18 @@ void FunctionCallLogger::observeInput(S2EExecutionState *state, const ObservedWi
         seed += static_cast<char>(c->getZExtValue());
     }
     std::ofstream out(s2e()->getOutputFilename("child-input-observations.jsonl"), std::ios::app);
+    const auto time = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
     out << "{\"schema\":3,\"event\":\"read\",\"instance\":" << s2e()->getCurrentInstanceIndex()
         << ",\"state\":" << state->getID() << ",\"pid\":" << call.pid << ",\"lifetime\":" << call.lifetime
         << ",\"depth\":" << call.depth << ",\"time_ns\":"
-        << std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count()
+        << time
         << ",\"caller_pc\":" << call.callerPc << ",\"diagnostic_lineage\":false,\"api\":\"" << call.api
         << "\",\"path_hex\":\"" << inputHex(call.path) << "\",\"value_hex\":\"" << inputHex(call.value)
         << "\",\"seed_hex\":\"" << inputHex(seed) << "\",\"count\":" << count << ",\"requested\":" << requested
         << ",\"registry_type\":" << registryType << ",\"return_value\":" << result << ",\"overlapped\":false}\n";
     out.close();
     if (!out) { getWarningsStream(state) << "Could not persist native input observation\n"; return; }
+    modelSelectedInput(state, call, buffer, seed, registryType, time);
     const unsigned sourceCount = ++journal.sources[key];
     ++journal.count;
     if (sourceCount == 32 || journal.count == 256) {

@@ -11,6 +11,7 @@
 #include <klee/util/ExprUtil.h>
 
 #include <algorithm>
+#include <chrono>
 #include <fstream>
 #include <iterator>
 #include <random>
@@ -335,6 +336,31 @@ void BehaviorSearcher::profileBranch(S2EExecutionState *state, uint64_t pc, cons
     }
     std::vector<klee::ref<klee::ReadExpr>> reads;
     klee::findReads(condition, true, reads);
+    // Keep the historical generic profile intact. The separate attributed
+    // profile joins unique KLEE arrays to completed-input models and ancestry.
+    uint64_t pid=0, lifetime=0, depth=0; bool diagnostic=false;
+    if (m_regionMonitor && m_regionMonitor->getProcessContext(state,pid,lifetime,depth,diagnostic)) {
+        std::ofstream attributed(s2e()->getOutputFilename("selected-input-branches.jsonl"),std::ios::app);
+        auto hex = [](const std::string &text) {
+            std::string result;for(unsigned char c:text) {result+="0123456789abcdef"[c>>4];result+="0123456789abcdef"[c&15];}
+            return result;
+        };
+        attributed << "{\"schema\":1,\"instance\":" << s2e()->getCurrentInstanceIndex()
+                   << ",\"state\":" << state->getID() << ",\"pid\":" << pid << ",\"lifetime\":" << lifetime
+                   << ",\"depth\":" << depth << ",\"diagnostic_lineage\":" << (diagnostic?"true":"false")
+                   << ",\"time_ns\":" << std::chrono::duration_cast<std::chrono::nanoseconds>(
+                          std::chrono::steady_clock::now().time_since_epoch()).count()
+                   << ",\"pc\":" << pc << ",\"dynamic\":" << (dynamic?"true":"false")
+                   << ",\"truncated\":" << (reads.size()>128?"true":"false") << ",\"reads\":[";
+        for(size_t i=0;i<std::min(reads.size(),size_t(128));++i) {
+            if(i) attributed << ',';
+            attributed << "{\"array_hex\":\"" << hex(reads[i]->getUpdates()->getRoot()->getName()) << "\",\"index\":";
+            auto index=dyn_cast<klee::ConstantExpr>(reads[i]->getIndex());
+            if(index) attributed << index->getZExtValue();else attributed << "null";
+            attributed << '}';
+        }
+        attributed << "]}\n";
+    }
     output << "{\"schema\":1,\"state\":" << state->getID() << ",\"pc\":" << pc
            << ",\"dynamic\":" << (dynamic ? "true" : "false") << ",\"constraints\":" << state->constraints().size()
            << ",\"truncated\":" << (reads.size() > 128 ? "true" : "false") << ",\"reads\":[";

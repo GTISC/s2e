@@ -7,6 +7,7 @@
 #
 #===------------------------------------------------------------------------===#
 set(KLEE_SOLVER_SRCS CachingSolver.cpp
+                     ConcolicSlice.cpp
                      CexCachingSolver.cpp
                      ConstantDivision.cpp
                      FastCexSolver.cpp

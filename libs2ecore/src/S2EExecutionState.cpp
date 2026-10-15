@@ -32,6 +32,7 @@
 #include <s2e/s2e_config.h>
 
 #include <klee/Context.h>
+#include <klee/ConcolicSlice.h>
 #include <klee/Memory.h>
 #include <klee/Solver.h>
 #include <s2e/S2E.h>
@@ -45,6 +46,7 @@
 #include <tcg/tcg-llvm.h>
 
 #include <iomanip>
+#include <fstream>
 #include <sstream>
 
 namespace klee {
@@ -53,6 +55,8 @@ extern llvm::cl::opt<bool> DebugLogStateMerge;
 
 namespace {
 // CPUTLBEntry s_cputlb_empty_entry = { -1, -1, -1, -1, 0 };
+llvm::cl::opt<bool> ConcolicModelSlicing("s2e-concolic-model-slicing", llvm::cl::init(false),
+    llvm::cl::desc("Solve transitive branch inputs and verify complete seed-preserving models"));
 }
 
 extern llvm::cl::opt<bool> PrintModeSwitch;
@@ -506,8 +510,27 @@ bool S2EExecutionState::testConstraints(const std::vector<ref<Expr>> &c, Constra
     ArrayVec symbObjects = symbolics;
 
     std::vector<std::vector<unsigned char>> concreteObjects;
-    if (!solver()->getInitialValues(Query(tmpConstraints, ConstantExpr::create(0, Expr::Bool)), symbObjects,
-                                    concreteObjects)) {
+    bool sliced = false;
+    if (ConcolicModelSlicing) {
+        ConcolicSliceStats stats;
+        sliced = tryConcolicSlice(*solver(), tmpConstraints, c, symbObjects, *concolics, concreteObjects, stats);
+        // Bounded native evidence: these are measured model dimensions, not
+        // speculative counts of solver calls or time saved.
+        static unsigned records = 0;
+        if (records <= 2048) {
+            std::ofstream out(g_s2e->getOutputFilename("concolic-slices.jsonl"), std::ios::app);
+            if (records++ == 2048) out << "{\"schema\":1,\"event\":\"cap\",\"limit\":2048}\n";
+            else out << "{\"schema\":1,\"event\":\"model\",\"instance\":" << g_s2e->getCurrentInstanceIndex()
+                     << ",\"state\":" << getID() << ",\"pc\":" << regs()->getPc()
+                     << ",\"sliced\":" << (sliced ? "true" : "false")
+                     << ",\"reason\":\"" << stats.reason << "\",\"constraints\":" << stats.constraints
+                     << ",\"selected_constraints\":" << stats.selectedConstraints
+                     << ",\"arrays\":" << stats.arrays << ",\"selected_arrays\":" << stats.selectedArrays
+                     << ",\"seed_bytes_retained\":" << stats.seedBytes << "}\n";
+        }
+    }
+    if (!sliced && !solver()->getInitialValues(Query(tmpConstraints, ConstantExpr::create(0, Expr::Bool)), symbObjects,
+                                              concreteObjects)) {
         return false;
     }
 

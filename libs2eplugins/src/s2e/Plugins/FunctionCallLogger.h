@@ -31,6 +31,7 @@
 #include <s2e/Plugins/OSMonitors/Support/ModuleExecutionDetector.h>
 #include <string>
 #include <tuple>
+#include "SelectedInput.h"
 
 namespace s2e {
 namespace plugins {
@@ -79,6 +80,11 @@ private:
     bool m_observeWindowsEffects = false;
     bool m_discoverRootInputs = false;
     bool m_discoverChildInputs = false;
+    SelectedInput m_selectedInput;
+    unsigned m_modeledInputs = 0;
+    void parseSelectedInput();
+    void modelSelectedInput(S2EExecutionState *state, const ObservedWindowsCall &call,
+                            uint64_t buffer, const std::string &seed, unsigned registryType, uint64_t time);
     struct InputJournal {
         bool enabled = false;
         unsigned count = 0;
