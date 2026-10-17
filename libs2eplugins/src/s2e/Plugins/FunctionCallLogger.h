@@ -116,6 +116,15 @@ private:
     void finishAsciiConversion(S2EExecutionState *state, const ObservedWindowsCall &call, uint32_t result);
     void parseSelectedInput();
     void parseConnectRedirect();
+    struct DoublingLoop {
+        bool enabled = false, accelerate = false;
+        std::string module, body;
+        uint32_t bodyRva = 0, siteRva = 0, thunkRva = 0, iatRva = 0;
+        uint32_t preferredBase = 0, imageSize = 0, initial = 0, stable = 4, maxCalls = 2;
+    } m_doublingLoop;
+    void parseDoublingLoop();
+    void onLoopTranslate(ExecutionSignal *signal, S2EExecutionState *state, TranslationBlock *tb, uint64_t pc);
+    void onLoopExecute(S2EExecutionState *state, uint64_t pc);
     void modelSelectedInput(S2EExecutionState *state, const ObservedWindowsCall &call,
                             uint64_t buffer, const std::string &seed, unsigned registryType, uint64_t time);
     struct InputJournal {

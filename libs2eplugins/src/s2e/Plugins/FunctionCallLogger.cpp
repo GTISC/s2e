@@ -38,6 +38,9 @@
 
 #include "FunctionCallLogger.h"
 #include "WindowsInputObservation.h"
+#include "DoublingLoop.h"
+#include <s2e/Plugins/OSMonitors/Support/ModuleMap.h>
+#include <s2e/Plugins/OSMonitors/Windows/WindowsMonitor.h>
 
 namespace s2e {
 namespace plugins {
@@ -62,6 +65,8 @@ public:
     std::set<std::string> asciiInputArrays;
     std::map<std::pair<uint64_t,uint64_t>, unsigned> selectedReads;
     std::set<std::tuple<uint64_t, uint64_t, uint32_t>> redirectedSockets;
+    std::map<std::tuple<uint64_t, uint64_t, uint64_t, uint32_t>, doubling_loop::Witness> loopWitnesses;
+    unsigned loopCalls = 0;
     static PluginState *factory(Plugin *p, S2EExecutionState *s) {
         return new FunctionCallLoggerState();
     }
@@ -92,6 +97,7 @@ void FunctionCallLogger::initialize() {
     m_preserveAsciiConversions = s2e()->getConfig()->getBool(getConfigKey() + ".preserveSelectedAsciiConversions", true);
     m_regions = s2e()->getPlugin<ExecutableRegionMonitor>();
     m_vmi = s2e()->getPlugin<Vmi>();
+    parseDoublingLoop();
     const bool observe = m_observeWindowsEffects || m_discoverRootInputs || m_discoverChildInputs ||
                          m_observeNetwork || m_observeAudio;
     if (observe && (!m_regions || !m_vmi)) {
@@ -108,6 +114,150 @@ void FunctionCallLogger::initialize() {
         monitor->onTailCall.connect(sigc::mem_fun(*this, &FunctionCallLogger::onCall));
     }
     if (m_discoverRootInputs || m_discoverChildInputs) enableInputJournal();
+}
+
+void FunctionCallLogger::parseDoublingLoop() {
+    auto cfg = s2e()->getConfig();
+    const std::string key = getConfigKey() + ".doublingLoopSummary";
+    if (!cfg->hasKey(key)) return;
+    auto fail = [&]() { getWarningsStream() << "Invalid doublingLoopSummary policy\n"; exit(-1); };
+    auto number = [&](const char *name, uint32_t low, uint32_t high) -> uint32_t {
+        bool ok; auto n = cfg->getInt(key + "." + name, 0, &ok);
+        if (!ok || n < low || n > high) fail();
+        return n;
+    };
+    m_doublingLoop.module = cfg->getString(key + ".module", "");
+    const auto mode = cfg->getString(key + ".mode", "");
+    m_doublingLoop.bodyRva = number("body_rva", 1, 0x1000000);
+    m_doublingLoop.siteRva = number("site_rva", 1, 0x1000000);
+    m_doublingLoop.thunkRva = number("thunk_rva", 1, 0x1000000);
+    m_doublingLoop.iatRva = number("iat_rva", 1, 0x1000000);
+    m_doublingLoop.preferredBase = number("preferred_base", 0x10000, 0xff000000);
+    m_doublingLoop.imageSize = number("image_size", 4096, 0x10000000);
+    m_doublingLoop.initial = number("initial_count", 16, 1000000000);
+    m_doublingLoop.stable = number("stable_iterations", 4, 16);
+    m_doublingLoop.maxCalls = number("max_calls", 1, 8);
+    const auto body = cfg->getString(key + ".body_code_hex", "");
+    // The transfer function is implemented only for this complete instruction
+    // shape. A caller cannot authorize a different loop by changing the bytes.
+    const std::string first = "8bd08bc903c68bd0908bc9508bc98bd0e8";
+    const std::string last = "908bc9588bd08bc903c28bc98bd0ff4dfc837dfc0075d4";
+    uint32_t relative = m_doublingLoop.thunkRva - (m_doublingLoop.bodyRva + 21);
+    std::string expected = first;
+    const char *hex = "0123456789abcdef";
+    for (unsigned i = 0; i < 4; ++i) { auto b = (relative >> (i*8)) & 255; expected += hex[b >> 4]; expected += hex[b & 15]; }
+    expected += last;
+    if (body != expected || m_doublingLoop.siteRva != m_doublingLoop.bodyRva + 35 ||
+        m_doublingLoop.module.empty() || m_doublingLoop.module.size() > 128 ||
+        (mode != "observe" && mode != "accelerate") || !m_regions || !m_vmi ||
+        !s2e()->getPlugin<ModuleMap>() || !s2e()->getPlugin<WindowsMonitor>()) fail();
+    for (size_t i = 0; i < body.size(); i += 2)
+        m_doublingLoop.body += char(std::stoul(body.substr(i, 2), nullptr, 16));
+    m_doublingLoop.accelerate = mode == "accelerate";
+    m_doublingLoop.enabled = true;
+    getInfoStream() << "NativeDoublingLoopSummary.v1\n";
+    s2e()->getCorePlugin()->onTranslateInstructionStart.connect(sigc::mem_fun(*this, &FunctionCallLogger::onLoopTranslate));
+}
+
+void FunctionCallLogger::onLoopTranslate(ExecutionSignal *signal, S2EExecutionState *state,
+                                        TranslationBlock *tb, uint64_t pc) {
+    // No current execution TB exists during the first translation. The event
+    // supplies the block whose mode is being translated.
+    if (!tb || !(tb->flags & (1 << HF_CS32_SHIFT)) || (tb->flags & (1 << HF_CS64_SHIFT))) return;
+    auto module = s2e()->getPlugin<ModuleMap>()->getModule(state, pc);
+    if (module && module->Name == m_doublingLoop.module && pc >= module->LoadBase &&
+        pc - module->LoadBase == m_doublingLoop.siteRva)
+        signal->connect(sigc::mem_fun(*this, &FunctionCallLogger::onLoopExecute));
+}
+
+void FunctionCallLogger::onLoopExecute(S2EExecutionState *state, uint64_t pc) {
+    uint64_t pid, lifetime, depth; bool diagnostic;
+    if (state->getPointerSize() != 4 || !m_regions->getProcessContext(state, pid, lifetime, depth, diagnostic) ||
+        depth || diagnostic) return;
+    DECLARE_PLUGINSTATE(FunctionCallLoggerState, state);
+    if (plgState->loopCalls >= m_doublingLoop.maxCalls) return;
+    const auto tid = s2e()->getPlugin<WindowsMonitor>()->getCurrentThreadId(state);
+    auto modules = s2e()->getPlugin<ModuleMap>();
+    auto module = modules->getModule(state, pid, pc);
+    if (!module || module->Name != m_doublingLoop.module || module->NativeBase != m_doublingLoop.preferredBase ||
+        module->Size != m_doublingLoop.imageSize || pc - module->LoadBase != m_doublingLoop.siteRva) return;
+    auto bytes = [&](uint64_t address, unsigned n, std::string &out) {
+        if (!address || address + n > (uint64_t(1) << 32)) return false;
+        for (unsigned i = 0; i < n; ++i) {
+            auto c = dyn_cast_or_null<klee::ConstantExpr>(state->mem()->read(address+i, klee::Expr::Int8));
+            if (!c) return false;
+            out += char(c->getZExtValue());
+        }
+        return true;
+    };
+    auto word = [&](uint64_t address, uint32_t &out) {
+        auto c = dyn_cast_or_null<klee::ConstantExpr>(state->mem()->read(address, klee::Expr::Int32));
+        if (!c) return false;
+        out = c->getZExtValue(); return true;
+    };
+    std::array<uint32_t, 8> regs;
+    for (unsigned i = 0; i < 8; ++i)
+        if (!state->regs()->read(CPU_OFFSET(regs[i]), &regs[i], 4, false)) return;
+    const auto key = std::make_tuple(pid, lifetime, tid, regs[5]);
+    if (!plgState->loopWitnesses.count(key) && plgState->loopWitnesses.size() >= 32) return;
+    auto &witness = plgState->loopWitnesses[key];
+    if (witness.done || witness.rejected) return;
+    std::string body, thunk;
+    uint32_t thunkSlot, callee, count, scratch;
+    if (regs[5] < 4 || regs[4] < 8 || regs[4] != regs[5] - 8 ||
+        !bytes(module->LoadBase + m_doublingLoop.bodyRva, m_doublingLoop.body.size(), body) || body != m_doublingLoop.body ||
+        !bytes(module->LoadBase + m_doublingLoop.thunkRva, 6, thunk) ||
+        (unsigned char)thunk[0] != 0xff || (unsigned char)thunk[1] != 0x25 ||
+        !word(module->LoadBase + m_doublingLoop.thunkRva + 2, thunkSlot) ||
+        thunkSlot != module->LoadBase + m_doublingLoop.iatRva || !word(thunkSlot, callee) ||
+        !word(regs[5]-4, count) || !word(regs[4]-4, scratch) || uint32_t(scratch * 2) != regs[0]) {
+        witness.rejected = true; return;
+    }
+    // Resolve only the measured kernel32 forwarder and exact read-only
+    // Windows 7 GetTickCount implementation. No other API can be summarized.
+    auto target = modules->getModule(state, pid, callee);
+    if (!target) { witness.rejected = true; return; }
+    auto exportedTick = [&](const ModuleDescriptorConstPtr &mod, uint32_t address) {
+        auto pe = std::dynamic_pointer_cast<vmi::PEFile>(m_vmi->getFromDisk(mod->Path, mod->Name, true));
+        if (!pe) return false;
+        auto exports = pe->getExports();
+        auto entry = exports.find(address - mod->LoadBase);
+        return entry != exports.end() && entry->second == "GetTickCount";
+    };
+    if (target->Name == "kernel32.dll") {
+        std::string wrapper; uint32_t slot;
+        if (!exportedTick(target, callee) || !bytes(callee, 9, wrapper) ||
+            wrapper != std::string("\xeb\x05\x90\x90\x90\x90\x90\xff\x25", 9) ||
+            !word(callee+9, slot) || slot < target->LoadBase || uint64_t(slot)+4 > target->LoadBase+target->Size ||
+            !word(slot, callee)) { witness.rejected = true; return; }
+        target = modules->getModule(state, pid, callee);
+    }
+    const std::string tick("\x8b\x0d\x24\x03\xfe\x7f\x8b\x15\x20\x03\xfe\x7f\xa1\x28\x03\xfe\x7f\x3b\xc8\x75\x1b\xa1\x04\x00\xfe\x7f\xf7\xe2\xc1\xe1\x08\x0f\xaf\x0d\x04\x00\xfe\x7f\x0f\xac\xd0\x18\xc1\xea\x18\x03\xc1\xc3\xf3\x90\xeb\xcc", 52);
+    std::string implementation;
+    if (!target || target->Name != "kernelbase.dll" || !exportedTick(target, callee) ||
+        !bytes(callee, tick.size(), implementation) || implementation != tick ||
+        !witness.observe(regs, count, m_doublingLoop.initial)) { witness.rejected = true; return; }
+    auto result = doubling_loop::summarize(regs[0], count);
+    const bool applied = m_doublingLoop.accelerate && witness.seen == m_doublingLoop.stable && count > 1;
+    std::ofstream out(s2e()->getOutputFilename("doubling-loop.jsonl"), std::ios::app);
+    out << "{\"schema\":1,\"event\":\"iteration\",\"instance\":" << s2e()->getCurrentInstanceIndex()
+        << ",\"state\":" << state->getID() << ",\"pid\":" << pid << ",\"lifetime\":" << lifetime << ",\"tid\":" << tid
+        << ",\"depth\":" << depth << ",\"pc\":" << pc << ",\"base\":" << module->LoadBase
+        << ",\"count\":" << count << ",\"seen\":" << witness.seen << ",\"eax\":" << regs[0] << ",\"edx\":" << regs[2]
+        << ",\"ecx\":" << regs[1] << ",\"esp\":" << regs[4] << ",\"ebp\":" << regs[5] << ",\"scratch\":" << scratch
+        << ",\"callee\":" << callee << ",\"applied\":" << (applied ? "true" : "false")
+        << ",\"skipped\":" << (applied ? result.skipped : 0)
+        << ",\"result_eax\":" << (applied ? result.eax : regs[0]) << ",\"result_edx\":" << (applied ? result.edx : regs[2])
+        << ",\"result_count\":" << (applied ? 1 : count) << "}\n";
+    out.close();
+    if (!out) { s2e()->getExecutor()->terminateState(*state, "Doubling loop journal failed"); return; }
+    if (witness.seen < m_doublingLoop.stable) return;
+    witness.done = true; ++plgState->loopCalls;
+    if (applied && (!state->regs()->write(CPU_OFFSET(regs[R_EAX]), &result.eax, 4) ||
+                    !state->regs()->write(CPU_OFFSET(regs[R_EDX]), &result.edx, 4) ||
+                    !state->mem()->write(regs[4]-4, &result.scratch, 4) ||
+                    !state->mem()->write(regs[5]-4, uint32_t(1))))
+        s2e()->getExecutor()->terminateState(*state, "Doubling loop update failed");
 }
 
 void FunctionCallLogger::parseConnectRedirect() {
