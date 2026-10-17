@@ -76,6 +76,14 @@ cl::opt<bool> SimplifySymIndices("simplify-sym-indices", cl::init(true));
 cl::opt<bool> SuppressExternalWarnings("suppress-external-warnings", cl::init(true));
 
 cl::opt<bool> NoExternals("no-externals", cl::desc("Do not allow external functin calls"));
+
+cl::opt<unsigned> ConcretizeDivRemAfterForks(
+    "concretize-div-rem-after-forks", cl::init(0),
+    cl::desc("Constrain symbolic division/remainder operands to the current seed after this many symbolic forks; 0 disables"));
+
+cl::opt<unsigned> ConcretizeBranchesAfterForks(
+    "concretize-branches-after-forks", cl::init(0),
+    cl::desc("Constrain later branch predicates to each state's seed after this many symbolic forks; 0 disables"));
 } // namespace
 
 namespace klee {
@@ -317,6 +325,11 @@ Executor::StatePair Executor::fork(ExecutionState &current, const ref<Expr> &con
     check(ce, "Could not evaluate the expression to a constant.");
 
     bool conditionIsTrue = ce->isTrue();
+    if (!keepConditionTrueInCurrentState && ConcretizeBranchesAfterForks &&
+        current.symbolicForkDepth >= ConcretizeBranchesAfterForks) {
+        auto concrete = current.toConstant(condition, "bounded branch after fork");
+        return concrete->isTrue() ? StatePair(&current, nullptr) : StatePair(nullptr, &current);
+    }
     if (current.forkDisabled) {
         if (conditionIsTrue) {
             if (current.addConstraintWhenForkingDisabled && !current.addConstraint(condition)) {
@@ -338,7 +351,7 @@ Executor::StatePair Executor::fork(ExecutionState &current, const ref<Expr> &con
         ConstraintManager tmpConstraints = current.constraints();
         tmpConstraints.addConstraint(condition);
 
-        if (!current.solve(tmpConstraints, *(current.concolics))) {
+        if (!current.solveWithConditions(tmpConstraints, {condition}, *(current.concolics))) {
             // Condition is always false in the current state
             return StatePair(nullptr, &current);
         }
@@ -347,15 +360,12 @@ Executor::StatePair Executor::fork(ExecutionState &current, const ref<Expr> &con
 
     // Build constraints for branched state
     ConstraintManager tmpConstraints = current.constraints();
-    if (conditionIsTrue) {
-        tmpConstraints.addConstraint(Expr::createIsZero(condition));
-    } else {
-        tmpConstraints.addConstraint(condition);
-    }
+    const ref<Expr> alternate = conditionIsTrue ? Expr::createIsZero(condition) : condition;
+    tmpConstraints.addConstraint(alternate);
 
     AssignmentPtr concolics = Assignment::create(true);
 
-    if (!current.solve(tmpConstraints, *concolics)) {
+    if (!current.solveWithConditions(tmpConstraints, {alternate}, *concolics)) {
         // std::string constraints_str;
         // llvm::raw_string_ostream rso(constraints_str);
         // current.dumpQuery(rso);
@@ -373,6 +383,9 @@ Executor::StatePair Executor::fork(ExecutionState &current, const ref<Expr> &con
     notifyBranch(current);
     branchedState = current.clone();
     addedStates.insert(branchedState);
+
+    ++current.symbolicForkDepth;
+    branchedState->symbolicForkDepth = current.symbolicForkDepth;
 
     *klee::stats::forks += 1;
 
@@ -984,6 +997,10 @@ void Executor::executeInstruction(ExecutionState &state, KInstruction *ki) {
         case Instruction::UDiv: {
             ref<Expr> left = eval(ki, 0, state).value;
             ref<Expr> right = eval(ki, 1, state).value;
+            if (ConcretizeDivRemAfterForks && state.symbolicForkDepth >= ConcretizeDivRemAfterForks) {
+                if (!isa<ConstantExpr>(left)) left = state.toConstant(left, "bounded post-fork symbolic division");
+                if (!isa<ConstantExpr>(right)) right = state.toConstant(right, "bounded post-fork symbolic division");
+            }
             ref<Expr> result = UDivExpr::create(left, right);
             state.bindLocal(ki, result);
             break;
@@ -992,6 +1009,10 @@ void Executor::executeInstruction(ExecutionState &state, KInstruction *ki) {
         case Instruction::SDiv: {
             ref<Expr> left = eval(ki, 0, state).value;
             ref<Expr> right = eval(ki, 1, state).value;
+            if (ConcretizeDivRemAfterForks && state.symbolicForkDepth >= ConcretizeDivRemAfterForks) {
+                if (!isa<ConstantExpr>(left)) left = state.toConstant(left, "bounded post-fork symbolic division");
+                if (!isa<ConstantExpr>(right)) right = state.toConstant(right, "bounded post-fork symbolic division");
+            }
             ref<Expr> result = SDivExpr::create(left, right);
             state.bindLocal(ki, result);
             break;
@@ -1000,6 +1021,10 @@ void Executor::executeInstruction(ExecutionState &state, KInstruction *ki) {
         case Instruction::URem: {
             ref<Expr> left = eval(ki, 0, state).value;
             ref<Expr> right = eval(ki, 1, state).value;
+            if (ConcretizeDivRemAfterForks && state.symbolicForkDepth >= ConcretizeDivRemAfterForks) {
+                if (!isa<ConstantExpr>(left)) left = state.toConstant(left, "bounded post-fork symbolic remainder");
+                if (!isa<ConstantExpr>(right)) right = state.toConstant(right, "bounded post-fork symbolic remainder");
+            }
             ref<Expr> result = URemExpr::create(left, right);
             state.bindLocal(ki, result);
             break;
@@ -1008,6 +1033,10 @@ void Executor::executeInstruction(ExecutionState &state, KInstruction *ki) {
         case Instruction::SRem: {
             ref<Expr> left = eval(ki, 0, state).value;
             ref<Expr> right = eval(ki, 1, state).value;
+            if (ConcretizeDivRemAfterForks && state.symbolicForkDepth >= ConcretizeDivRemAfterForks) {
+                if (!isa<ConstantExpr>(left)) left = state.toConstant(left, "bounded post-fork symbolic remainder");
+                if (!isa<ConstantExpr>(right)) right = state.toConstant(right, "bounded post-fork symbolic remainder");
+            }
             ref<Expr> result = SRemExpr::create(left, right);
             state.bindLocal(ki, result);
             break;

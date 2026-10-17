@@ -3,6 +3,7 @@
 ///
 
 #include "ExecutableRegionMonitor.h"
+#include "ExecutableThreadPolicy.h"
 
 #include <s2e/ConfigFile.h>
 #include <s2e/Plugins/ExecutionTracers/TestCaseGenerator.h>
@@ -583,8 +584,33 @@ void ExecutableRegionMonitor::onBlockExecute(S2EExecutionState *state, uint64_t 
     }
 
     uint64_t tid = m_windows->getCurrentThreadId(state);
-    if (m_requireInstrumentationReady && !isTrustedThread(plgState, pid, tid)) {
+    const bool trusted = isTrustedThread(plgState, pid, tid);
+    bool ownedExecution = false;
+    if (m_requireInstrumentationReady && !trusted) {
+        const auto owner = plgState->descendants.find(pid);
+        if (owner != plgState->descendants.end()) {
+            const auto module = m_modules->getModule(state, pid, pc);
+            ownedExecution = module && lowerCase(module->Name) == owner->second.imageName;
+            if (!ownedExecution) {
+                ownedExecution = std::any_of(
+                    plgState->regions.begin(), plgState->regions.end(),
+                    [&](const ExecutableRegion &region) {
+                        return region.pid == pid && region.start <= pc && pc < region.end;
+                    });
+            }
+        }
+    }
+    if (!admitExecutionThread(m_requireInstrumentationReady, trusted,
+                              plgState->armedPids.count(pid), ownedExecution)) {
         return;
+    }
+    if (m_requireInstrumentationReady && !trusted) {
+        // Some supported Windows guests report thread activity to the guest
+        // log without emitting WindowsMonitor::onThreadCreate. Recover the
+        // lineage at its first sample-owned block and retain it for API hooks.
+        plgState->trustedThreads[pid].insert(tid);
+        getInfoStream(state) << "ExecutableRegionMonitor: trustedThreadObserved pid=" << hexval(pid)
+                             << " tid=" << hexval(tid) << " pc=" << hexval(pc) << "\n";
     }
 
     if (m_recordExecutionCoverage) {

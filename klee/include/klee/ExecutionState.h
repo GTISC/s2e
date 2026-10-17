@@ -81,6 +81,10 @@ public:
     /// Whether to add the constraints at branches when forking is disabled
     bool addConstraintWhenForkingDisabled;
 
+    /// Number of symbolic forks on this state's lineage. This supports
+    /// opt-in, post-fork concretization of expensive arithmetic.
+    unsigned symbolicForkDepth;
+
     /// ordered list of symbolics: used to generate test cases.
     std::vector<ArrayPtr> symbolics;
 
@@ -149,6 +153,12 @@ public:
     ///
     bool solve(const ConstraintManager &mgr, Assignment &assignment);
 
+    // Solve after adding predicates to the current path. Engines can narrow
+    // the model using these predicates without guessing from constraint order.
+    // Failure must leave assignment untouched, including when it aliases concolics.
+    virtual bool solveWithConditions(const ConstraintManager &mgr, const std::vector<ref<Expr>> &added,
+                                     Assignment &assignment);
+
     virtual bool merge(const ExecutionState &b);
 
     void printStack(std::stringstream &msg) const;
@@ -161,6 +171,9 @@ public:
         return s_simplifier;
     }
 
+    // Passive notification after a symbolic value is replaced by a constant.
+    // This hook must not solve, constrain, or modify the expression.
+    virtual void onConcretization(const ref<Expr> &, const ref<ConstantExpr> &, const std::string &, bool) {}
     ref<ConstantExpr> toConstant(ref<Expr> e, const std::string &reason);
     uint64_t toConstant(const ref<Expr> &value, const ObjectStateConstPtr &os, size_t offset);
     ref<ConstantExpr> toConstantSilent(ref<Expr> e);

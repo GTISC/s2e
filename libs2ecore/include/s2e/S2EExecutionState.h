@@ -310,6 +310,14 @@ public:
         m_runningExceptionEmulationCode = val;
     }
 
+    bool m_concretizationAudit = false;
+    void enableConcretizationAudit();
+    virtual void onConcretization(const klee::ref<klee::Expr> &expression, const klee::ref<klee::ConstantExpr> &value,
+                          const std::string &reason, bool constrained);
+    bool solveWithConditions(const klee::ConstraintManager &mgr,
+                             const std::vector<klee::ref<klee::Expr>> &added,
+                             klee::Assignment &assignment);
+
     bool testConstraints(const std::vector<klee::ref<klee::Expr>> &c, klee::ConstraintManager *newConstraints = nullptr,
                          klee::Assignment *newConcolics = nullptr);
 

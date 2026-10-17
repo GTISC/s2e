@@ -10,12 +10,15 @@ namespace klee {
 struct ConcolicSliceStats {
     size_t constraints = 0, selectedConstraints = 0;
     size_t arrays = 0, selectedArrays = 0, seedBytes = 0;
+    size_t bytes = 0, selectedBytes = 0;
+    bool unsat = false;
     const char *reason = "not_attempted";
 };
 
-// Build a complete, verified model by solving the array-level transitive
-// closure of added conditions. Disconnected arrays retain their seed values.
-// Failure/unknown is never UNSAT: the caller must use its ordinary full solve.
+// Build a complete, verified model by solving the byte-level transitive
+// closure of added conditions. Disconnected bytes retain their seed values. Symbolic indices retain whole arrays.
+// A definite reduced-query UNSAT is reported in stats.unsat. Every other
+// failure/unknown requires the ordinary full solve.
 // Neither the path constraints nor the original seed assignment are modified.
 bool tryConcolicSlice(Solver &solver, const ConstraintManager &constraints,
                       const std::vector<ref<Expr>> &added, const ArrayVec &objects,

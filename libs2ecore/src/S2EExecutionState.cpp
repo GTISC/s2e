@@ -40,6 +40,9 @@
 #include <s2e/s2e_libcpu.h>
 
 #include <klee/util/ExprPPrinter.h>
+#include <klee/util/ExprUtil.h>
+#include <chrono>
+#include <map>
 #include <llvm/Support/CommandLine.h>
 #include <s2e/CorePlugin.h>
 
@@ -57,6 +60,16 @@ namespace {
 // CPUTLBEntry s_cputlb_empty_entry = { -1, -1, -1, -1, 0 };
 llvm::cl::opt<bool> ConcolicModelSlicing("s2e-concolic-model-slicing", llvm::cl::init(false),
     llvm::cl::desc("Solve transitive branch inputs and verify complete seed-preserving models"));
+}
+
+namespace {
+struct ConcretizationJournal { bool enabled = false; unsigned count = 0; };
+std::map<unsigned, ConcretizationJournal> s_concretizationJournals;
+std::string auditHex(const std::string &value) {
+    std::string result;
+    for (unsigned char c : value) { result += "0123456789abcdef"[c >> 4]; result += "0123456789abcdef"[c & 15]; }
+    return result;
+}
 }
 
 extern llvm::cl::opt<bool> PrintModeSwitch;
@@ -487,6 +500,87 @@ void S2EExecutionState::enumPossibleRanges(ref<Expr> e, ref<Expr> start, ref<Exp
 
 /***/
 
+void S2EExecutionState::enableConcretizationAudit() {
+    auto &journal = s_concretizationJournals[g_s2e->getCurrentInstanceIndex()];
+    if (!journal.enabled) {
+        std::ofstream out(g_s2e->getOutputFilename("selected-input-concretizations.jsonl"), std::ios::app);
+        out << "{\"schema\":1,\"event\":\"enabled\",\"instance\":" << g_s2e->getCurrentInstanceIndex() << "}\n";
+        out.close(); journal.enabled = bool(out);
+    }
+    m_concretizationAudit = journal.enabled;
+}
+
+void S2EExecutionState::onConcretization(const ref<Expr> &expression, const ref<ConstantExpr> &value,
+                                        const std::string &reason, bool constrained) {
+    if (!m_concretizationAudit) return;
+    auto &journal = s_concretizationJournals[g_s2e->getCurrentInstanceIndex()];
+    if (journal.count >= 1024) return;
+    klee::ArrayVec arrays;
+    klee::findSymbolicObjects(expression, arrays);
+    std::vector<std::string> selected;
+    for (const auto &array : arrays)
+        if (array->getName().find("_selected") != std::string::npos) selected.push_back(array->getName());
+    if (selected.empty()) return;
+    std::ofstream out(g_s2e->getOutputFilename("selected-input-concretizations.jsonl"), std::ios::app);
+    out << "{\"schema\":1,\"event\":\"concretization\",\"instance\":" << g_s2e->getCurrentInstanceIndex()
+        << ",\"state\":" << getID() << ",\"pc\":" << regs()->getPc() << ",\"time_ns\":"
+        << std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count()
+        << ",\"reason_hex\":\"" << auditHex(reason) << "\",\"constrained\":" << (constrained ? "true" : "false")
+        << ",\"width\":" << value->getWidth() << ",\"arrays_hex\":[";
+    for (size_t i = 0; i < selected.size(); ++i) { if (i) out << ','; out << '\"' << auditHex(selected[i]) << '\"'; }
+    out << "]}\n";
+    if (journal.count + 1 == 1024)
+        out << "{\"schema\":1,\"event\":\"cap\",\"instance\":" << g_s2e->getCurrentInstanceIndex() << ",\"limit\":1024}\n";
+    out.close();
+    if (out) ++journal.count;
+}
+
+bool S2EExecutionState::solveWithConditions(const ConstraintManager &mgr,
+                                             const std::vector<ref<Expr>> &added,
+                                             Assignment &assignment) {
+#ifdef CONFIG_SYMBEX_MP
+    ArrayVec symbObjects = symbolics;
+
+    std::vector<std::vector<unsigned char>> concreteObjects;
+    bool sliced = false;
+    if (ConcolicModelSlicing) {
+        ConcolicSliceStats stats;
+        sliced = tryConcolicSlice(*solver(), mgr, added, symbObjects, *concolics, concreteObjects, stats);
+        // Bounded native evidence: these are measured model dimensions, not
+        // speculative counts of solver calls or time saved.
+        static unsigned records = 0;
+        if (records <= 2048) {
+            std::ofstream out(g_s2e->getOutputFilename("concolic-slices.jsonl"), std::ios::app);
+            if (records++ == 2048) out << "{\"schema\":1,\"event\":\"cap\",\"limit\":2048}\n";
+            else out << "{\"schema\":1,\"event\":\"model\",\"instance\":" << g_s2e->getCurrentInstanceIndex()
+                     << ",\"state\":" << getID() << ",\"pc\":" << regs()->getPc()
+                     << ",\"sliced\":" << (sliced ? "true" : "false")
+                     << ",\"reason\":\"" << stats.reason << "\",\"constraints\":" << stats.constraints
+                     << ",\"selected_constraints\":" << stats.selectedConstraints
+                     << ",\"arrays\":" << stats.arrays << ",\"selected_arrays\":" << stats.selectedArrays
+                     << ",\"seed_bytes_retained\":" << stats.seedBytes
+                     << ",\"bytes\":" << stats.bytes << ",\"selected_bytes\":" << stats.selectedBytes
+                     << ",\"unsat\":" << (stats.unsat ? "true" : "false") << "}\n";
+        }
+        if (stats.unsat) return false;
+    }
+    if (!sliced && !solver()->getInitialValues(Query(mgr, ConstantExpr::create(0, Expr::Bool)), symbObjects,
+                                              concreteObjects)) {
+        return false;
+    }
+
+    // Complete and verify before replacing the assignment: callers may pass
+    // the state's own seed here during a forced-outcome recomputation.
+    assignment.clear();
+    for (unsigned i = 0; i < symbObjects.size(); ++i) {
+        assignment.add(symbObjects[i], concreteObjects[i]);
+    }
+    return true;
+#else
+    return ExecutionState::solveWithConditions(mgr, added, assignment);
+#endif
+}
+
 /// \brief Try to solve additional state constraints
 ///
 /// Find solution for merged original state constraints and
@@ -507,30 +601,8 @@ bool S2EExecutionState::testConstraints(const std::vector<ref<Expr>> &c, Constra
         tmpConstraints.addConstraint(*it);
     }
 
-    ArrayVec symbObjects = symbolics;
-
-    std::vector<std::vector<unsigned char>> concreteObjects;
-    bool sliced = false;
-    if (ConcolicModelSlicing) {
-        ConcolicSliceStats stats;
-        sliced = tryConcolicSlice(*solver(), tmpConstraints, c, symbObjects, *concolics, concreteObjects, stats);
-        // Bounded native evidence: these are measured model dimensions, not
-        // speculative counts of solver calls or time saved.
-        static unsigned records = 0;
-        if (records <= 2048) {
-            std::ofstream out(g_s2e->getOutputFilename("concolic-slices.jsonl"), std::ios::app);
-            if (records++ == 2048) out << "{\"schema\":1,\"event\":\"cap\",\"limit\":2048}\n";
-            else out << "{\"schema\":1,\"event\":\"model\",\"instance\":" << g_s2e->getCurrentInstanceIndex()
-                     << ",\"state\":" << getID() << ",\"pc\":" << regs()->getPc()
-                     << ",\"sliced\":" << (sliced ? "true" : "false")
-                     << ",\"reason\":\"" << stats.reason << "\",\"constraints\":" << stats.constraints
-                     << ",\"selected_constraints\":" << stats.selectedConstraints
-                     << ",\"arrays\":" << stats.arrays << ",\"selected_arrays\":" << stats.selectedArrays
-                     << ",\"seed_bytes_retained\":" << stats.seedBytes << "}\n";
-        }
-    }
-    if (!sliced && !solver()->getInitialValues(Query(tmpConstraints, ConstantExpr::create(0, Expr::Bool)), symbObjects,
-                                              concreteObjects)) {
+    auto candidate = Assignment::create(true);
+    if (!solveWithConditions(tmpConstraints, c, *candidate)) {
         return false;
     }
 
@@ -538,10 +610,7 @@ bool S2EExecutionState::testConstraints(const std::vector<ref<Expr>> &c, Constra
         *newConstraints = tmpConstraints;
     }
     if (newConcolics) {
-        newConcolics->clear();
-        for (unsigned i = 0; i < symbObjects.size(); ++i) {
-            newConcolics->add(symbObjects[i], concreteObjects[i]);
-        }
+        *newConcolics = *candidate;
     }
 #endif
 

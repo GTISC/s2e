@@ -26,6 +26,8 @@
 #include <s2e/Plugin.h>
 
 #include <map>
+#include <vector>
+#include <klee/Expr.h>
 #include <s2e/Plugins/Core/BaseInstructions.h>
 #include <s2e/Plugins/ExecutionMonitors/FunctionMonitor.h>
 #include <s2e/Plugins/OSMonitors/Support/ModuleExecutionDetector.h>
@@ -39,13 +41,24 @@ namespace plugins {
 class ExecutableRegionMonitor;
 class Vmi;
 struct ObservedWindowsCall {
-    std::string api, path, value, data;
+    std::string api, path, value, data, module;
+    std::string originalSockaddr, effectiveSockaddr, peerSockaddr, bufferPrefix;
     uint64_t pid = 0, lifetime = 0, depth = 0;
     uint32_t args[9] = {};
     bool diagnostic = false;
     bool recordEffect = false;
+    bool network = false;
+    bool audio = false;
+    bool redirected = false;
+    bool bufferConcrete = false;
     uint64_t callerPc = 0;
     uint32_t requested = 0;
+    uint32_t callId = 0, socket = 0, flags = 0, addressLength = 0;
+    uint32_t listenerSocket = 0, acceptedSocket = 0, backlog = 0;
+    std::vector<std::pair<uint64_t, klee::ref<klee::Expr>>> conversionInput;
+    std::vector<klee::ref<klee::Expr>> conversionOutput;
+    std::string conversionSeed;
+    std::vector<std::string> conversionArrays;
 };
 
 enum S2E_FUNCTIONCALLLOGGER_COMMANDS {
@@ -80,9 +93,24 @@ private:
     bool m_observeWindowsEffects = false;
     bool m_discoverRootInputs = false;
     bool m_discoverChildInputs = false;
+    bool m_observeNetwork = false;
+    unsigned m_networkCalls = 0;
+    bool m_observeAudio = false;
+    unsigned m_audioCalls = 0;
+    struct ConnectRedirect {
+        bool enabled = false;
+        bool loopback = false;
+        std::string module, code, sockaddr, scope = "child";
+        uint32_t rva = 0;
+    } m_connectRedirect;
     SelectedInput m_selectedInput;
     unsigned m_modeledInputs = 0;
+    bool m_preserveAsciiConversions = true;
+    unsigned m_asciiConversions = 0;
+    void prepareAsciiConversion(S2EExecutionState *state, ObservedWindowsCall &call);
+    void finishAsciiConversion(S2EExecutionState *state, const ObservedWindowsCall &call, uint32_t result);
     void parseSelectedInput();
+    void parseConnectRedirect();
     void modelSelectedInput(S2EExecutionState *state, const ObservedWindowsCall &call,
                             uint64_t buffer, const std::string &seed, unsigned registryType, uint64_t time);
     struct InputJournal {
@@ -93,7 +121,20 @@ private:
     std::map<unsigned, InputJournal> m_inputJournals;
     std::map<std::string, std::map<uint64_t, std::string>> m_exports;
     void enableInputJournal();
+    struct AccessJournal {
+        bool enabled = false;
+        unsigned count = 0;
+        std::map<std::tuple<uint64_t, uint64_t, uint64_t, std::string, std::string, std::string, uint64_t>, unsigned> sources;
+    };
+    std::map<unsigned, AccessJournal> m_accessJournals;
+    void observeAccess(S2EExecutionState *state, const ObservedWindowsCall &call, uint32_t result);
     void observeInput(S2EExecutionState *state, const ObservedWindowsCall &call, uint32_t result);
+    bool prepareNetworkCall(S2EExecutionState *state, const ModuleDescriptorConstPtr &source,
+                            ObservedWindowsCall &call);
+    void recordNetworkEvent(S2EExecutionState *state, const ObservedWindowsCall &call,
+                            const char *event, uint32_t result);
+    void recordAudioEvent(S2EExecutionState *state, const ObservedWindowsCall &call,
+                          const char *event, uint32_t result);
     void onReturn(S2EExecutionState *state, const ModuleDescriptorConstPtr &source,
                   const ModuleDescriptorConstPtr &dest, uint64_t pc, ObservedWindowsCall call);
     void onProcessUnload(S2EExecutionState *state, uint64_t addressSpace, uint64_t pid, uint64_t returnCode);

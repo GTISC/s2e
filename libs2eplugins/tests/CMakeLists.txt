@@ -16,7 +16,7 @@ target_include_directories(ManagedProtocolTest PRIVATE ../../guest/common/includ
 target_compile_options(ManagedProtocolTest PRIVATE -Wall -Wextra -Werror -UNDEBUG)
 add_test(NAME ManagedProtocol COMMAND ManagedProtocolTest)
 
-foreach(test BehaviorOracle DynamicForkBudget ExplorationBudget SparseSymbolicPolicy WindowsInputObservation SelectedInput)
+foreach(test BehaviorOracle DynamicForkBudget ExplorationBudget SparseSymbolicPolicy WindowsInputObservation SelectedInput ExecutableThreadPolicy)
     add_executable(${test}Test ${test}Test.cpp)
     target_compile_features(${test}Test PRIVATE cxx_std_17)
     target_include_directories(${test}Test PRIVATE ../src)

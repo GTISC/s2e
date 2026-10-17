@@ -63,7 +63,8 @@ std::set<ObjectKey, ObjectKeyLTS> ExecutionState::s_ignoredMergeObjects;
 
 ExecutionState::ExecutionState(KFunction *kf)
     : pc(kf->getInstructions()), prevPC(nullptr), addressSpace(this), forkDisabled(false),
-      concolics(Assignment::create(true)), addConstraintWhenForkingDisabled(AddConstraintWhenForkingDisabledDefault) {
+      addConstraintWhenForkingDisabled(AddConstraintWhenForkingDisabledDefault), symbolicForkDepth(0),
+      concolics(Assignment::create(true)) {
     pushFrame(0, kf);
 }
 
@@ -453,6 +454,7 @@ ref<ConstantExpr> ExecutionState::toConstant(ref<Expr> e, const std::string &rea
         abort();
     }
 
+    onConcretization(e, value, reason, true);
     return value;
 }
 
@@ -472,7 +474,9 @@ uint64_t ExecutionState::toConstant(const ref<Expr> &value, const ObjectStateCon
 ref<ConstantExpr> ExecutionState::toConstantSilent(ref<Expr> e) {
     ref<Expr> evalResult = concolics->evaluate(e);
     assert(isa<ConstantExpr>(evalResult) && "Must be concrete");
-    return dyn_cast<ConstantExpr>(evalResult);
+    auto value = dyn_cast<ConstantExpr>(evalResult);
+    if (!isa<ConstantExpr>(e)) onConcretization(e, value, "toConstantSilent", false);
+    return value;
 }
 
 ref<Expr> ExecutionState::toUnique(ref<Expr> &e) {
@@ -516,6 +520,11 @@ bool ExecutionState::solve(const ConstraintManager &mgr, Assignment &assignment)
     return true;
 }
 
+bool ExecutionState::solveWithConditions(const ConstraintManager &mgr, const std::vector<ref<Expr>> &added,
+                                         Assignment &assignment) {
+    return solve(mgr, assignment);
+}
+
 bool ExecutionState::addConstraint(const ref<Expr> &constraint, bool recomputeConcolics) {
     auto simplified = simplifyExpr(constraint);
     auto se = dyn_cast<ConstantExpr>(simplified);
@@ -535,7 +544,7 @@ bool ExecutionState::addConstraint(const ref<Expr> &constraint, bool recomputeCo
         if (recomputeConcolics) {
             ConstraintManager newConstraints = m_constraints;
             newConstraints.addConstraint(simplified);
-            if (!solve(newConstraints, *concolics)) {
+            if (!solveWithConditions(newConstraints, {simplified}, *concolics)) {
                 *klee_warning_stream << "Could not compute concolic values for the new constraint\n";
                 return false;
             }

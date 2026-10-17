@@ -98,3 +98,84 @@ TEST(ConcolicSliceTest, SolverFailureOrBadModelCannotProduceATrigger) {
     backend->fail=false;backend->corrupt=true;
     EXPECT_FALSE(tryConcolicSlice(*solver,constraints,{branch},objects,*seed,values,stats));EXPECT_TRUE(values.empty());
 }
+
+TEST(ConcolicSliceTest, SingleArrayKeepsUnrelatedBytesConcrete) {
+    auto data = Array::create("single_array", 4);
+    auto seed = Assignment::create(true); seed->add(data, {21,22,23,24});
+    ConstraintManager constraints;
+    for (unsigned i=0;i<4;++i) constraints.addConstraint(UleExpr::create(number(20), byte(data,i)));
+    auto branch = EqExpr::create(byte(data), number(37)); constraints.addConstraint(branch);
+    auto backend=std::make_shared<RecordingSolver>(); auto solver=Solver::create(backend);
+    std::vector<std::vector<unsigned char>> values; ConcolicSliceStats stats;
+    ASSERT_TRUE(tryConcolicSlice(*solver,constraints,{branch},{data},*seed,values,stats));
+    EXPECT_EQ(values[0], (std::vector<unsigned char>{37,22,23,24}));
+    EXPECT_EQ(stats.arrays,1u); EXPECT_EQ(stats.selectedArrays,1u);
+    EXPECT_EQ(stats.bytes,4u); EXPECT_EQ(stats.selectedBytes,1u); EXPECT_EQ(stats.seedBytes,3u);
+    EXPECT_LT(stats.selectedConstraints,stats.constraints);
+}
+
+TEST(ConcolicSliceTest, ConnectedOffsetsExpandBeforeSolving) {
+    auto data=Array::create("offset_chain",4);
+    auto seed=Assignment::create(true);seed->add(data,{0,0,0,29});
+    ConstraintManager constraints;
+    constraints.addConstraint(EqExpr::create(byte(data,1),byte(data,2)));
+    constraints.addConstraint(EqExpr::create(byte(data,0),byte(data,1)));
+    auto branch=EqExpr::create(byte(data),number(7));constraints.addConstraint(branch);
+    auto backend=std::make_shared<RecordingSolver>();auto solver=Solver::create(backend);
+    std::vector<std::vector<unsigned char>> values;ConcolicSliceStats stats;
+    ASSERT_TRUE(tryConcolicSlice(*solver,constraints,{branch},{data},*seed,values,stats));
+    EXPECT_EQ(values[0],(std::vector<unsigned char>{7,7,7,29}));
+    EXPECT_EQ(stats.selectedBytes,3u);EXPECT_EQ(stats.seedBytes,1u);
+}
+
+TEST(ConcolicSliceTest, DisconnectedByteWithInvalidSeedRequiresFullSolve) {
+    auto data=Array::create("bad_byte_seed",2);
+    auto seed=Assignment::create(true);seed->add(data,{0,0});
+    ConstraintManager constraints;constraints.addConstraint(UleExpr::create(number(20),byte(data,1)));
+    auto branch=EqExpr::create(byte(data),number(7));constraints.addConstraint(branch);
+    auto backend=std::make_shared<RecordingSolver>();auto solver=Solver::create(backend);
+    std::vector<std::vector<unsigned char>> values;ConcolicSliceStats stats;
+    EXPECT_FALSE(tryConcolicSlice(*solver,constraints,{branch},{data},*seed,values,stats));
+    EXPECT_STREQ(stats.reason,"full_constraint_validation_failed");EXPECT_TRUE(values.empty());
+}
+
+TEST(ConcolicSliceTest, UpdatesRetainIndexAndValueDependencies) {
+    auto data=Array::create("updated_data",4), index=Array::create("store_index",1), value=Array::create("store_value",1);
+    auto seed=Assignment::create(true);seed->add(data,{0,22,23,24});seed->add(index,{0});seed->add(value,{0});
+    auto updates=UpdateList::create(data,nullptr);
+    updates->extend(ZExtExpr::create(byte(index),Expr::Int32),byte(value));
+    auto read=ReadExpr::create(updates,ConstantExpr::create(0,Expr::Int32));
+    auto branch=EqExpr::create(read,number(7));
+    ConstraintManager constraints;constraints.addConstraint(EqExpr::create(byte(index),number(0)));constraints.addConstraint(branch);
+    auto backend=std::make_shared<RecordingSolver>();auto solver=Solver::create(backend);
+    std::vector<std::vector<unsigned char>> values;ConcolicSliceStats stats;
+    ASSERT_TRUE(tryConcolicSlice(*solver,constraints,{branch},{data,index,value},*seed,values,stats));
+    EXPECT_EQ(values[0][1],22);EXPECT_EQ(values[0][2],23);EXPECT_EQ(values[0][3],24);
+    EXPECT_EQ(values[1][0],0);EXPECT_EQ(values[2][0],7);
+}
+
+TEST(ConcolicSliceTest, ReducedUnsatIsDistinctFromFailureAndBadSeed) {
+    auto data=Array::create("unsat_slice",4);
+    auto seed=Assignment::create(true);seed->add(data,{21,22,23,24});
+    ConstraintManager constraints;constraints.addConstraint(UleExpr::create(number(20),byte(data)));
+    auto branch=EqExpr::create(byte(data),number(0));constraints.addConstraint(branch);
+    auto backend=std::make_shared<RecordingSolver>();auto solver=Solver::create(backend);
+    std::vector<std::vector<unsigned char>> values;ConcolicSliceStats stats;
+    EXPECT_FALSE(tryConcolicSlice(*solver,constraints,{branch},{data},*seed,values,stats));
+    EXPECT_TRUE(stats.unsat);EXPECT_STREQ(stats.reason,"slice_unsat");EXPECT_TRUE(values.empty());
+    backend->fail=true;
+    EXPECT_FALSE(tryConcolicSlice(*solver,constraints,{branch},{data},*seed,values,stats));
+    EXPECT_FALSE(stats.unsat);EXPECT_STREQ(stats.reason,"slice_solver_failed");
+}
+
+TEST(ConcolicSliceTest, FullySelectedArrayDoesNotRequireASeedWhenNoiseIsOmitted) {
+    auto data=Array::create("all_selected",2), noise=Array::create("omitted_noise",1);
+    auto seed=Assignment::create(true);seed->add(noise,{37});
+    ConstraintManager constraints;
+    auto branch=AndExpr::create(EqExpr::create(byte(data),number(7)),EqExpr::create(byte(data,1),number(8)));
+    constraints.addConstraint(branch);
+    auto backend=std::make_shared<RecordingSolver>();auto solver=Solver::create(backend);
+    std::vector<std::vector<unsigned char>> values;ConcolicSliceStats stats;
+    ASSERT_TRUE(tryConcolicSlice(*solver,constraints,{branch},{data,noise},*seed,values,stats));
+    EXPECT_EQ(values[0],(std::vector<unsigned char>{7,8}));EXPECT_EQ(values[1][0],37);
+}
