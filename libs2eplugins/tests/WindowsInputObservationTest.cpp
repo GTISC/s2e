@@ -30,6 +30,23 @@ int main() {
     assert(!bufferExtent(4097, 8192, true));
     assert(!bufferExtent(4, 4, false));
     assert(!bufferExtent(4, 4, true, true));
+    assert(largeReadExtent(115712, 115712, true, false));
+    assert(!largeReadExtent(4096, 8192, true, false));
+    assert(!largeReadExtent(8193, 8192, true, false));
+    assert(!largeReadExtent(8192, 8192, false, false));
+    assert(!largeReadExtent(8192, 8192, true, true));
+    assert(!largeReadExtent(64 * 1024 * 1024 + 1, UINT32_MAX, true, false));
+    const std::string preferred("\xff\x15\xf8\x42\x41\x00", 6);
+    const std::string lower("\xff\x15\xf8\x42\x20\x00", 6);
+    const std::string higher("\xff\x15\xf8\x42\x61\x00", 6);
+    assert(relocatedIndirectCall(preferred, preferred, 0x400000, 0x400000, 0x154000));
+    assert(relocatedIndirectCall(lower, preferred, 0x400000, 0x1f0000, 0x154000));
+    assert(relocatedIndirectCall(higher, preferred, 0x400000, 0x600000, 0x154000));
+    assert(!relocatedIndirectCall(preferred, preferred, 0x400000, 0x1f0000, 0x154000));
+    assert(!relocatedIndirectCall(std::string("\xff\x25\xf8\x42\x20\x00", 6), preferred, 0x400000, 0x1f0000, 0x154000));
+    assert(!relocatedIndirectCall(lower, preferred, 0x500000, 0x1f0000, 0x154000));
+    assert(!relocatedIndirectCall(lower, preferred, 0x400000, UINT32_MAX, 0x154000));
+    assert(!relocatedIndirectCall(lower.substr(0, 5), preferred, 0x400000, 0x1f0000, 0x154000));
     uint32_t bytes = 0, requested = 0;
     assert(environmentExtent(3, 4, 2, bytes, requested));
     assert(bytes == 6 && requested == 8);
@@ -51,4 +68,8 @@ int main() {
     assert(!networkAddressExtent(129));
     assert(ipv4Sockaddr(std::string("\x02\x00", 2) + std::string(14, '\0')));
     assert(!ipv4Sockaddr(std::string("\x17\x00", 2) + std::string(14, '\0')));
+    const std::string endpoint("\x02\x00\x1e\xd2\xaa\x27\xbb\xe7", 8);
+    assert(sameIpv4Endpoint(endpoint + std::string(8, '\0'), endpoint + std::string(8, '\x77')));
+    assert(!sameIpv4Endpoint(endpoint + std::string(8, '\0'), std::string("\x17\x00", 2) + endpoint.substr(2) + std::string(8, '\0')));
+    assert(!sameIpv4Endpoint(endpoint + std::string(8, '\0'), endpoint.substr(0, 7) + "x" + std::string(8, '\0')));
 }

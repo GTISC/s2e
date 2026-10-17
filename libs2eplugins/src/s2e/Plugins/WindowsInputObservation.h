@@ -49,6 +49,31 @@ inline bool bufferExtent(uint32_t count, uint32_t requested, bool completed, boo
     return completed && !overlapped && count && count <= requested && count <= 4096;
 }
 
+// Summaries preserve large completed reads without turning a sampled prefix
+// into an authoritative complete source or widening symbolic input budgets.
+inline bool largeReadExtent(uint32_t count, uint32_t requested, bool completed, bool overlapped) {
+    return completed && !overlapped && count > 4096 && count <= requested && count <= 64 * 1024 * 1024;
+}
+
+// Only the operand of a host-verified PE HIGHLOW relocation may differ.
+// Preserve opcode and in-image IAT identity across both positive and negative
+// load biases; never mask arbitrary instruction bytes to obtain a match.
+inline bool relocatedIndirectCall(const std::string &actual, const std::string &original,
+                                  uint64_t preferredBase, uint64_t loadBase, uint64_t imageSize) {
+    if (actual.size() != 6 || original.size() != 6 ||
+        static_cast<unsigned char>(original[0]) != 0xff ||
+        (static_cast<unsigned char>(original[1]) != 0x15 && static_cast<unsigned char>(original[1]) != 0x25) ||
+        actual[0] != original[0] || actual[1] != original[1] || !imageSize ||
+        preferredBase + imageSize > (uint64_t(1) << 32) || loadBase + imageSize > (uint64_t(1) << 32)) return false;
+    uint32_t wanted = 0, observed = 0;
+    for (unsigned i = 0; i < 4; ++i) {
+        wanted |= uint32_t(static_cast<unsigned char>(original[i + 2])) << (8 * i);
+        observed |= uint32_t(static_cast<unsigned char>(actual[i + 2])) << (8 * i);
+    }
+    return wanted >= preferredBase && uint64_t(wanted) + 4 <= preferredBase + imageSize &&
+           uint64_t(observed) == loadBase + (wanted - preferredBase);
+}
+
 inline bool environmentExtent(uint32_t returned, uint32_t capacity, unsigned width, uint32_t &bytes,
                               uint32_t &requested) {
     if ((width != 1 && width != 2) || !returned || returned >= capacity ||
@@ -73,6 +98,10 @@ inline bool networkAddressExtent(uint32_t length) {
 
 inline bool ipv4Sockaddr(const std::string &bytes) {
     return bytes.size() == 16 && static_cast<unsigned char>(bytes[0]) == 2 && bytes[1] == 0;
+}
+
+inline bool sameIpv4Endpoint(const std::string &left, const std::string &right) {
+    return ipv4Sockaddr(left) && ipv4Sockaddr(right) && left.compare(0, 8, right, 0, 8) == 0;
 }
 
 } } }

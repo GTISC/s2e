@@ -151,6 +151,17 @@ void FunctionCallLogger::parseConnectRedirect() {
          static_cast<unsigned char>(code[1]) != 0x25) ||
         !input_observation::ipv4Sockaddr(m_connectRedirect.sockaddr)) fail();
     m_connectRedirect.rva = rva;
+    if (cfg->hasKey(key + ".relocation_rva")) {
+        auto relocation = cfg->getInt(key + ".relocation_rva", 0, &ok);
+        if (!ok || relocation != rva + 2) fail();
+        auto base = cfg->getInt(key + ".preferred_base", 0, &ok);
+        if (!ok || base <= 0 || base > UINT32_MAX) fail();
+        auto size = cfg->getInt(key + ".image_size", 0, &ok);
+        if (!ok || size <= rva + 6 || uint64_t(base) + size > (uint64_t(1) << 32)) fail();
+        m_connectRedirect.preferredBase = base;
+        m_connectRedirect.imageSize = size;
+        m_connectRedirect.relocatedOperand = true;
+    } else if (cfg->hasKey(key + ".preferred_base") || cfg->hasKey(key + ".image_size")) fail();
     m_connectRedirect.loopback = mode == "loopback";
     m_connectRedirect.enabled = true;
 }
@@ -485,7 +496,12 @@ void FunctionCallLogger::observeInput(S2EExecutionState *state, const ObservedWi
     std::string seed;
     const unsigned width = call.api.back() == 'W' ? 2 : 1;
     if (call.api == "ReadFile") {
-        if (!read32(call.args[3], count) ||
+        if (!read32(call.args[3], count)) return;
+        if (input_observation::largeReadExtent(count, requested, result != 0, call.args[4] != 0)) {
+            observeLargeRead(state, call, result, count);
+            return;
+        }
+        if (
             !input_observation::bufferExtent(count, requested, result != 0, call.args[4] != 0)) return;
         buffer = call.args[1];
     } else if (call.api.find("RegQueryValueEx") == 0) {
@@ -541,6 +557,35 @@ void FunctionCallLogger::observeInput(S2EExecutionState *state, const ObservedWi
     }
 }
 
+void FunctionCallLogger::observeLargeRead(S2EExecutionState *state, const ObservedWindowsCall &call,
+                                         uint32_t result, uint32_t count) {
+    if (m_largeReads >= 256 || !call.args[1] || uint64_t(call.args[1]) + count > (uint64_t(1) << 32)) return;
+    std::string prefix, suffix;
+    auto capture = [&](uint64_t start, std::string &bytes) {
+        for (unsigned i = 0; i < 2048; ++i) {
+            auto byte = dyn_cast_or_null<klee::ConstantExpr>(state->mem()->read(start + i, klee::Expr::Int8));
+            if (!byte) return false;
+            bytes += static_cast<char>(byte->getZExtValue());
+        }
+        return true;
+    };
+    // A symbolic or unreadable sample is not a completed concrete summary.
+    if (!capture(call.args[1], prefix) || !capture(uint64_t(call.args[1]) + count - 2048, suffix)) return;
+    std::ofstream out(s2e()->getOutputFilename("large-input-reads.jsonl"), std::ios::app);
+    out << "{\"schema\":1,\"event\":\"read_summary\",\"instance\":" << s2e()->getCurrentInstanceIndex()
+        << ",\"state\":" << state->getID() << ",\"pid\":" << call.pid << ",\"lifetime\":" << call.lifetime
+        << ",\"depth\":" << call.depth << ",\"time_ns\":"
+        << std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count()
+        << ",\"caller_pc\":" << call.callerPc << ",\"api\":\"ReadFile\",\"diagnostic_lineage\":false"
+        << ",\"path_hex\":\"" << inputHex(call.path) << "\",\"handle\":" << call.args[0]
+        << ",\"buffer\":" << call.args[1] << ",\"count\":" << count << ",\"requested\":" << call.requested
+        << ",\"return_value\":" << result << ",\"overlapped\":false,\"complete_buffer\":false"
+        << ",\"prefix_hex\":\"" << inputHex(prefix) << "\",\"suffix_hex\":\"" << inputHex(suffix) << "\"}\n";
+    out.close();
+    if (!out) s2e()->getExecutor()->terminateState(*state, "Large input summary journal write failed");
+    ++m_largeReads;
+}
+
 bool FunctionCallLogger::prepareNetworkCall(S2EExecutionState *state, const ModuleDescriptorConstPtr &source,
                                             ObservedWindowsCall &call) {
     if (!m_observeNetwork || !source || call.diagnostic || m_networkCalls >= 256) return false;
@@ -588,9 +633,16 @@ bool FunctionCallLogger::prepareNetworkCall(S2EExecutionState *state, const Modu
     if (m_connectRedirect.enabled && call.api == "connect" && scopeMatches &&
         call.module == m_connectRedirect.module && call.callerPc >= source->LoadBase &&
         call.callerPc - source->LoadBase == m_connectRedirect.rva &&
-        call.originalSockaddr == m_connectRedirect.sockaddr) {
+        input_observation::sameIpv4Endpoint(call.originalSockaddr, m_connectRedirect.sockaddr)) {
         std::string code;
-        if (readBytes(call.callerPc, 6, code) && inputHex(code) == m_connectRedirect.code &&
+        std::string original;
+        for (unsigned i = 0; i < 12; i += 2)
+            original += static_cast<char>(std::stoul(m_connectRedirect.code.substr(i, 2), nullptr, 16));
+        if (readBytes(call.callerPc, 6, code) &&
+            (m_connectRedirect.relocatedOperand ?
+                source->NativeBase == m_connectRedirect.preferredBase && source->Size == m_connectRedirect.imageSize &&
+                input_observation::relocatedIndirectCall(code, original, source->NativeBase, source->LoadBase, source->Size) :
+                inputHex(code) == m_connectRedirect.code) &&
             m_connectRedirect.loopback) {
             DECLARE_PLUGINSTATE(FunctionCallLoggerState, state);
             auto identity = std::make_tuple(call.pid, call.lifetime, call.socket);

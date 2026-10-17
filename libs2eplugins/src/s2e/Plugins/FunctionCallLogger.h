@@ -97,11 +97,16 @@ private:
     unsigned m_networkCalls = 0;
     bool m_observeAudio = false;
     unsigned m_audioCalls = 0;
+    unsigned m_largeReads = 0;
+    void observeLargeRead(S2EExecutionState *state, const ObservedWindowsCall &call, uint32_t result,
+                          uint32_t count);
     struct ConnectRedirect {
         bool enabled = false;
         bool loopback = false;
         std::string module, code, sockaddr, scope = "child";
         uint32_t rva = 0;
+        bool relocatedOperand = false;
+        uint32_t preferredBase = 0, imageSize = 0;
     } m_connectRedirect;
     SelectedInput m_selectedInput;
     unsigned m_modeledInputs = 0;
