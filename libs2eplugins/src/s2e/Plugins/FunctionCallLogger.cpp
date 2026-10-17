@@ -99,6 +99,7 @@ void FunctionCallLogger::initialize() {
         exit(-1);
     }
     if (observe) {
+        getDebugStream() << "NativeWindowsObservation.runtime-caller.v1\n";
         auto os = static_cast<OSMonitor *>(s2e()->getPlugin("OSMonitor"));
         os->onProcessUnload.connect(sigc::mem_fun(*this, &FunctionCallLogger::onProcessUnload));
     }
@@ -730,6 +731,10 @@ void FunctionCallLogger::onCall(S2EExecutionState *state, const ModuleDescriptor
         return;
     ObservedWindowsCall call;
     call.callerPc = callerPc;
+    // FunctionMonitor exposes preferred/native coordinates to its subscribers;
+    // memory inspection, RVA gates and native journals require runtime PCs.
+    // Keep calleePc native for the PE export lookup below.
+    if (source && (!source->ToRuntime(callerPc, call.callerPc) || call.callerPc > UINT32_MAX)) return;
     call.recordEffect = !source || source->Name.size() < 4 || source->Name.substr(source->Name.size() - 4) != ".dll";
     if (!m_regions->getProcessContext(state, call.pid, call.lifetime, call.depth, call.diagnostic))
         return;
