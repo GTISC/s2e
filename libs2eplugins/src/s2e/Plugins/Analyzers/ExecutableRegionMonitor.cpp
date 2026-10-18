@@ -150,6 +150,11 @@ static bool isTrustedThread(const ExecutableRegionMonitorState *state, uint64_t 
 void ExecutableRegionMonitor::recordChild(S2EExecutionState *state, const char *event, uint64_t pid, uint64_t pc) {
     DECLARE_PLUGINSTATE(ExecutableRegionMonitorState, state);
     const auto &child = plgState->descendants.at(pid);
+    // Image entry and the first coverage block can describe the same activation.
+    // Emit one causal activation per state/PID/lifetime, including cloned states.
+    if (std::string(event) == "activated-image" &&
+        !plgState->coverageActivations.insert(std::make_tuple(state->getID(), pid, child.lifetime)).second) return;
+
     // Hex encodes arbitrary image-name bytes without trusting them as JSON syntax.
     std::string encoded;
     for (unsigned char c : child.imageName) {
@@ -761,7 +766,7 @@ void ExecutableRegionMonitor::recordExecutionCoverage(S2EExecutionState *state, 
     const auto key = std::make_tuple(state->getID(), pid, owner.lifetime, pc, code);
     if (plgState->coverageBlocks.count(key)) return;
     const auto activation = std::make_tuple(state->getID(), pid, owner.lifetime);
-    if (plgState->coverageActivations.insert(activation).second) {
+    if (!plgState->coverageActivations.count(activation)) {
         recordChild(state, "activated-image", pid, pc);
     }
     std::string image;

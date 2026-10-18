@@ -867,6 +867,69 @@ void FunctionCallLogger::recordAudioEvent(S2EExecutionState *state, const Observ
     if (!out) s2e()->getExecutor()->terminateState(*state, "Audio journal write failed");
 }
 
+// Passive, bounded lifecycle evidence. Never reads data buffers or chooses symbolic values.
+void FunctionCallLogger::recordLifecycle(S2EExecutionState *state, const ObservedWindowsCall &call,
+                                         bool returned, uint32_t result) {
+    if (!call.lifecycle) return;
+    auto now = std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+    std::ofstream out(s2e()->getOutputFilename("api-lifecycle.jsonl"), std::ios::app);
+    out << "{\"schema\":1,\"instance\":" << s2e()->getCurrentInstanceIndex()
+        << ",\"state\":" << state->getID() << ",\"pid\":" << call.pid
+        << ",\"lifetime\":" << call.lifetime << ",\"depth\":" << call.depth
+        << ",\"diagnostic_lineage\":false,\"call_id\":" << call.callId
+        << ",\"time_ns\":" << (returned ? now : call.entryTime) << ",\"entry_time_ns\":" << call.entryTime
+        << ",\"event\":\"" << (returned ? "return" : "enter") << "\",\"api\":\"" << call.api
+        << "\",\"module_hex\":\"" << inputHex(call.module) << "\",\"caller_pc\":" << call.callerPc
+        << ",\"callee_pc\":" << call.calleePc << ",\"path_hex\":\"" << inputHex(call.path)
+        << "\",\"value_hex\":\"" << inputHex(call.value) << "\",\"requested\":" << call.requested
+        << ",\"input_capacity\":0";
+    const bool io = call.api == "ReadFile" || call.api == "WriteFile";
+    if (io || call.api == "CloseHandle") out << ",\"handle\":" << call.args[0];
+    if (io) {
+        out << ",\"overlapped\":" << (call.args[4] ? "true" : "false")
+            << ",\"count_address\":" << call.args[3];
+        if (returned) {
+            auto c = call.args[3] ? dyn_cast_or_null<klee::ConstantExpr>(
+                state->mem()->read(call.args[3], klee::Expr::Int32)) : nullptr;
+            bool valid = result && !call.args[4] && c && c->getZExtValue() <= call.args[2];
+            out << ",\"io_count_concrete\":" << (valid ? "true" : "false")
+                << ",\"io_count\":" << (valid ? c->getZExtValue() : 0);
+        }
+    }
+    if (call.api == "CredEnumerateA" || call.api == "CredEnumerateW") {
+        out << ",\"credential_flags\":" << call.args[1]
+            << ",\"credential_count_address\":" << call.args[2]
+            << ",\"credential_array_address\":" << call.args[3];
+        if (returned) {
+            auto read32 = [&](uint32_t address, uint32_t &value) {
+                auto c = address ? dyn_cast_or_null<klee::ConstantExpr>(
+                    state->mem()->read(address, klee::Expr::Int32)) : nullptr;
+                if (!c) return false;
+                value = c->getZExtValue(); return true;
+            };
+            uint32_t count = 0, array = 0;
+            bool valid = result && read32(call.args[2], count) && read32(call.args[3], array) &&
+                         count <= 4096 && (!count || array);
+            out << ",\"credential_count\":" << (valid ? count : 0)
+                << ",\"credential_array\":" << (valid ? array : 0)
+                << ",\"credential_output_concrete\":" << (valid ? "true" : "false");
+        }
+    }
+    if (call.api.find("CreateFile") == 0)
+        out << ",\"desired_access\":" << call.args[1] << ",\"creation_disposition\":" << call.args[4]
+            << ",\"file_flags\":" << call.args[5];
+    if (returned) {
+        bool success = call.api.find("Reg") == 0 ? result == 0 :
+            (call.api.find("CreateFile") == 0 ? result != UINT32_MAX : result != 0);
+        out << ",\"result\":" << result << ",\"success\":" << (success ? "true" : "false")
+            << ",\"elapsed_ns\":" << now - call.entryTime;
+    }
+    out << "}\n";
+    out.close();
+    if (!out) s2e()->getExecutor()->terminateState(*state, "API lifecycle journal write failed");
+}
+
 void FunctionCallLogger::onCall(S2EExecutionState *state, const ModuleDescriptorConstPtr &source,
                                 const ModuleDescriptorConstPtr &dest, uint64_t callerPc, uint64_t calleePc,
                                 const FunctionMonitor::ReturnSignalPtr &returnSignal) {
@@ -904,6 +967,7 @@ void FunctionCallLogger::onCall(S2EExecutionState *state, const ModuleDescriptor
         return;
     call.api = name->second;
     static const std::map<std::string, unsigned> supported = {
+        {"CredEnumerateA", 4}, {"CredEnumerateW", 4},
         {"CreateFileA", 7},   {"CreateFileW", 7},     {"CopyFileA", 3},       {"CopyFileW", 3},
         {"WriteFile", 5},     {"CloseHandle", 1},     {"RegCloseKey", 1},     {"RegOpenKeyExA", 5},
         {"RegOpenKeyExW", 5}, {"RegCreateKeyExA", 9}, {"RegCreateKeyExW", 9}, {"RegSetValueExA", 6},
@@ -1005,6 +1069,9 @@ void FunctionCallLogger::onCall(S2EExecutionState *state, const ModuleDescriptor
         call.path.clear();
         if (!readText(call.args[0], call.path))
             return;
+    } else if (call.api == "CredEnumerateA" || call.api == "CredEnumerateW") {
+        call.path.clear();
+        if (!call.args[2] || !call.args[3] || (call.args[0] && !readText(call.args[0], call.path))) return;
     } else if (call.api == "ReadFile") {
         if (call.path.empty() || call.args[4]) return;
         call.requested = call.args[2];
@@ -1039,6 +1106,21 @@ void FunctionCallLogger::onCall(S2EExecutionState *state, const ModuleDescriptor
                 return;
         }
     }
+    // Track only direct non-DLL calls in the causally monitored process tree.
+    // File handles stay state/PID/lifetime local in the existing observer map.
+    bool tracked = call.api.find("CredEnumerate") == 0 || call.api.find("Reg") == 0 || call.api == "ReadFile" || call.api == "WriteFile" ||
+                   call.api == "CloseHandle" || call.api == "CreateFileA" || call.api == "CreateFileW";
+    auto &counted = m_lifecycleCalls[s2e()->getCurrentInstanceIndex()];
+    if (tracked && call.recordEffect && !call.diagnostic && counted < 8192) {
+        call.lifecycle = true;
+        call.callId = ++counted;
+        call.module = dest->Name;
+        if (!dest->ToRuntime(calleePc, call.calleePc)) return;
+        call.entryTime = std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
+        if (call.api == "WriteFile") call.requested = call.args[2];
+        recordLifecycle(state, call, false, 0);
+    }
     if (call.api == "WideCharToMultiByte") prepareAsciiConversion(state, call);
     returnSignal->stackCleanup = 4 * count->second;
     returnSignal->connect(sigc::bind(sigc::mem_fun(*this, &FunctionCallLogger::onReturn), call));
@@ -1054,6 +1136,8 @@ void FunctionCallLogger::onReturn(S2EExecutionState *state, const ModuleDescript
     uint32_t result;
     if (!state->regs()->read(CPU_OFFSET(regs[R_EAX]), &result, sizeof(result), false))
         return;
+    if (!diagnostic) recordLifecycle(state, call, true, result);
+    if (call.api == "CredEnumerateA" || call.api == "CredEnumerateW") return;
     if (call.audio) {
         if (call.api == "waveInOpen" && result == 0 && call.args[0]) {
             auto expression = state->mem()->read(call.args[0], klee::Expr::Int32);
@@ -1192,7 +1276,7 @@ void FunctionCallLogger::onReturn(S2EExecutionState *state, const ModuleDescript
         << std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch())
                .count()
         << ",\"state\":" << state->getID() << ",\"pid\":" << pid << ",\"lifetime\":" << lifetime
-        << ",\"depth\":" << depth << ",\"diagnostic_lineage\":" << (diagnostic ? "true" : "false") << ",\"api\":\""
+        << ",\"depth\":" << depth << ",\"call_id\":" << call.callId << ",\"diagnostic_lineage\":" << (diagnostic ? "true" : "false") << ",\"api\":\""
         << call.api << "\",\"path_hex\":\"" << hex(call.path) << "\",\"value_hex\":\"" << hex(call.value)
         << "\",\"data_hex\":\"" << hex(call.data) << "\",\"bytes_written\":" << bytes
         << ",\"buffer_prefix_hex\":\"" << hex(bufferPrefix) << "\",\"buffer_prefix_bytes\":" << bufferPrefix.size()
