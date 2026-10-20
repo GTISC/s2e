@@ -85,6 +85,7 @@ public:
     // Include state ID in keys: cloned states must retain their own evidence.
     std::set<std::tuple<uint64_t, uint64_t, uint64_t>> coverageActivations;
     std::set<std::tuple<uint64_t, uint64_t, uint64_t, uint64_t, std::string>> coverageBlocks;
+    std::set<std::tuple<uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, std::string>> frontierObservations;
 
     static PluginState *factory(Plugin *plugin, S2EExecutionState *state) {
         return new ExecutableRegionMonitorState();
@@ -265,6 +266,28 @@ void ExecutableRegionMonitor::initialize() {
     if (!ok) {
         getWarningsStream() << "ExecutableRegionMonitor: recordExecutionCoverage must be a boolean\n";
         exit(-1);
+    }
+
+    const auto checkpoints = cfg->getListKeys(getConfigKey() + ".frontierCheckpoints");
+    if (checkpoints.size() > 16 || (!checkpoints.empty() && !m_recordExecutionCoverage)) {
+        getWarningsStream() << "ExecutableRegionMonitor: at most 16 frontier checkpoints require execution coverage\n";
+        exit(-1);
+    }
+    for (const auto &name : checkpoints) {
+        const auto key = getConfigKey() + ".frontierCheckpoints." + name;
+        const auto pc = cfg->getInt(key + ".pcRva", -1);
+        const auto data = cfg->getInt(key + ".dataRva", -1);
+        const auto width = cfg->getInt(key + ".width", -1);
+        if (pc < 0 || pc > UINT32_MAX || data < 0 || data > UINT32_MAX ||
+            (width != 1 && width != 2 && width != 4 && width != 8) ||
+            std::any_of(m_frontierCheckpoints.begin(), m_frontierCheckpoints.end(),
+                        [&](const FrontierCheckpoint &c) { return c.pcRva == static_cast<uint64_t>(pc) &&
+                                                                  c.dataRva == static_cast<uint64_t>(data); })) {
+            getWarningsStream() << "ExecutableRegionMonitor: invalid frontier checkpoint\n";
+            exit(-1);
+        }
+        m_frontierCheckpoints.push_back({static_cast<uint64_t>(pc), static_cast<uint64_t>(data),
+                                         static_cast<unsigned>(width)});
     }
 
     int64_t maxDumpBytes = cfg->getInt(getConfigKey() + ".maxDumpBytes", 1024 * 1024, &ok);
@@ -763,6 +786,46 @@ void ExecutableRegionMonitor::recordExecutionCoverage(S2EExecutionState *state, 
         code += "0123456789abcdef"[byte & 15];
     }
     const auto &owner = process->second;
+    // Observe only host-selected root-image data, immediately before its TB.
+    // Read expressions individually: evidence collection must never invoke the
+    // solver, concretize a symbolic byte, or write to specimen memory.
+    if (!owner.depth && plgState->frontierObservations.size() < 256) {
+        for (const auto &checkpoint : m_frontierCheckpoints) {
+            if (plgState->frontierObservations.size() >= 256) break;
+            if (checkpoint.pcRva != pc - module->LoadBase) continue;
+            std::string status = "concrete", data;
+            if (checkpoint.dataRva >= module->Size || checkpoint.width > module->Size - checkpoint.dataRva) {
+                status = "out_of_image";
+            } else {
+                for (unsigned i = 0; i < checkpoint.width; ++i) {
+                    const auto value = state->mem()->read(module->LoadBase + checkpoint.dataRva + i,
+                                                          klee::Expr::Int8);
+                    if (!value) { status = "unreadable"; break; }
+                    const auto constant = dyn_cast<klee::ConstantExpr>(value);
+                    if (!constant) { status = "symbolic"; break; }
+                    const auto byte = constant->getZExtValue();
+                    data += "0123456789abcdef"[byte >> 4];
+                    data += "0123456789abcdef"[byte & 15];
+                }
+            }
+            if (status != "concrete") data.clear();
+            const auto observation = std::make_tuple(state->getID(), pid, owner.lifetime, pc,
+                                                     checkpoint.dataRva, status + data);
+            if (plgState->frontierObservations.count(observation)) continue;
+            std::ofstream frontier(s2e()->getOutputFilename("frontier-observations.jsonl"), std::ios::app);
+            frontier << "{\"schema\":1,\"instance\":" << s2e()->getCurrentInstanceIndex()
+                << ",\"state\":" << state->getID() << ",\"pid\":" << pid << ",\"lifetime\":" << owner.lifetime
+                << ",\"depth\":0,\"tid\":" << m_windows->getCurrentThreadId(state)
+                << ",\"time_ns\":"
+                << std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count()
+                << ",\"base\":" << module->LoadBase << ",\"pc_rva\":" << checkpoint.pcRva
+                << ",\"data_rva\":" << checkpoint.dataRva << ",\"width\":" << checkpoint.width
+                << ",\"status\":\"" << status << "\",\"data_hex\":\"" << data
+                << "\",\"code_hex\":\"" << code << "\"}\n";
+            frontier.close();
+            if (frontier) plgState->frontierObservations.insert(observation);
+        }
+    }
     const auto key = std::make_tuple(state->getID(), pid, owner.lifetime, pc, code);
     if (plgState->coverageBlocks.count(key)) return;
     const auto activation = std::make_tuple(state->getID(), pid, owner.lifetime);

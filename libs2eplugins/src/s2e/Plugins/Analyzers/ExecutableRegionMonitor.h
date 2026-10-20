@@ -13,6 +13,7 @@
 #include <s2e/Plugins/OSMonitors/Windows/WindowsMonitor.h>
 
 #include <string>
+#include <vector>
 
 namespace s2e {
 namespace plugins {
@@ -39,6 +40,13 @@ class ExecutableRegionMonitor : public Plugin, public IPluginInvoker {
     uint64_t m_maxChildren = 64;
     uint64_t m_nextAllocationId = 1;
     uint64_t m_nextProcessId = 1;
+
+    struct FrontierCheckpoint {
+        uint64_t pcRva;
+        uint64_t dataRva;
+        unsigned width;
+    };
+    std::vector<FrontierCheckpoint> m_frontierCheckpoints;
 
     void recordChild(S2EExecutionState *state, const char *event, uint64_t pid, uint64_t pc = 0);
     void recordExecutionCoverage(S2EExecutionState *state, uint64_t pid, uint64_t pc);
