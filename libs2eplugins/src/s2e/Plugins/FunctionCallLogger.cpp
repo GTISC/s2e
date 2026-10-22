@@ -1056,6 +1056,28 @@ void FunctionCallLogger::recordLifecycle(S2EExecutionState *state, const Observe
             << ",\"registry_data_concrete\":" << (call.bufferConcrete ? "true" : "false")
             << ",\"registry_data_hex\":\"" << inputHex(call.bufferPrefix) << "\"";
     }
+    if (call.api.find("Reg") == 0) {
+        out << ",\"registry_handle\":" << call.args[0]
+            << ",\"registry_arguments\":[";
+        for (unsigned i = 0; i < call.argumentCount; ++i) {
+            if (i) out << ',';
+            out << call.args[i];
+        }
+        out << ']';
+        if (call.api.find("RegOpenKey") == 0 || call.api.find("RegCreateKey") == 0) {
+            unsigned index = (call.api == "RegOpenKeyA" || call.api == "RegOpenKeyW") ? 2 :
+                             (call.api.find("RegOpenKey") == 0 ? 4 : 7);
+            out << ",\"registry_output_address\":" << call.args[index];
+            if (returned) {
+                auto c = (result == 0 && call.args[index]) ? dyn_cast_or_null<klee::ConstantExpr>(
+                    state->mem()->read(call.args[index], klee::Expr::Int32)) : nullptr;
+                out << ",\"registry_output_concrete\":" << (c ? "true" : "false")
+                    << ",\"registry_output_handle\":" << (c ? c->getZExtValue() : 0);
+            }
+        }
+        if (call.api.find("RegSaveKey") == 0)
+            out << ",\"registry_save_flags\":" << (call.api.find("RegSaveKeyEx") == 0 ? call.args[3] : 1);
+    }
     const bool io = call.api == "ReadFile" || call.api == "WriteFile";
     if (io || call.api == "CloseHandle") out << ",\"handle\":" << call.args[0];
     if (call.api == "GetProcAddress") out << ",\"module_handle\":" << call.args[0];
@@ -1208,7 +1230,8 @@ void FunctionCallLogger::onCall(S2EExecutionState *state, const ModuleDescriptor
         {"CredEnumerateA", 4}, {"CredEnumerateW", 4},
         {"CreateFileA", 7},   {"CreateFileW", 7},     {"CopyFileA", 3},       {"CopyFileW", 3},
         {"WriteFile", 5},     {"CloseHandle", 1},     {"RegCloseKey", 1},     {"RegOpenKeyExA", 5},
-        {"RegOpenKeyExW", 5}, {"RegCreateKeyExA", 9}, {"RegCreateKeyExW", 9}, {"RegSetValueExA", 6},
+        {"RegOpenKeyExW", 5}, {"RegOpenKeyA", 3}, {"RegOpenKeyW", 3},
+        {"RegSaveKeyA", 3}, {"RegSaveKeyW", 3}, {"RegSaveKeyExA", 4}, {"RegSaveKeyExW", 4}, {"RegCreateKeyExA", 9}, {"RegCreateKeyExW", 9}, {"RegSetValueExA", 6},
         {"RegSetValueExW", 6}, {"ReadFile", 5}, {"RegQueryValueExA", 6}, {"RegQueryValueExW", 6},
         {"GetEnvironmentVariableA", 3}, {"GetEnvironmentVariableW", 3}, {"WideCharToMultiByte", 8},
         {"GetCommandLineA", 0}, {"GetCommandLineW", 0},
@@ -1255,6 +1278,7 @@ void FunctionCallLogger::onCall(S2EExecutionState *state, const ModuleDescriptor
     for (unsigned i = 0; i < count->second; ++i)
         if (!read32(state->regs()->getSp() + 4 * (i + 1), call.args[i]))
             return;
+    call.argumentCount = count->second;
     const bool remoteProcess = call.api == "VirtualAllocEx" || call.api == "WriteProcessMemory" ||
                                call.api == "VirtualProtectEx" || call.api == "CreateRemoteThread";
     if (remoteProcess) {
@@ -1549,6 +1573,8 @@ void FunctionCallLogger::onCall(S2EExecutionState *state, const ModuleDescriptor
         if (call.path.empty() || !readText(call.args[1], subkey))
             return;
         call.path += "\\" + subkey;
+    } else if (call.api.find("RegSaveKey") == 0) {
+        if (call.path.empty() || !readText(call.args[1], call.value)) return;
     } else if (call.api.find("RegSetValue") == 0) {
         if (call.path.empty() || (call.args[1] && !readText(call.args[1], call.value)))
             return;
@@ -1567,12 +1593,13 @@ void FunctionCallLogger::onCall(S2EExecutionState *state, const ModuleDescriptor
                 return;
         }
     }
-    // Track only direct non-DLL calls in the causally monitored process tree.
+    // Positive effects use direct non-DLL calls in the monitored process tree.
+    // DLL RegCloseKey calls are negative-only evidence that invalidates stale handles.
     // File handles stay state/PID/lifetime local in the existing observer map.
     bool tracked = call.api.find("CredEnumerate") == 0 || call.api.find("Reg") == 0 || call.api == "ReadFile" || call.api == "WriteFile" || call.api == "GetProcAddress" || remoteProcess ||
                    call.api == "CloseHandle" || call.api == "CreateFileA" || call.api == "CreateFileW";
     auto &counted = m_lifecycleCalls[s2e()->getCurrentInstanceIndex()];
-    if (tracked && call.recordEffect && !call.diagnostic && counted < 8192) {
+    if (tracked && (call.recordEffect || call.api == "RegCloseKey") && !call.diagnostic && counted < 8192) {
         call.lifecycle = true;
         call.callId = ++counted;
         call.module = dest->Name;
@@ -1608,6 +1635,8 @@ void FunctionCallLogger::onReturn(S2EExecutionState *state, const ModuleDescript
         return;
     if (!diagnostic) recordLifecycle(state, call, true, result);
     if (call.api == "CredEnumerateA" || call.api == "CredEnumerateW") return;
+    if (call.api.find("RegSaveKey") == 0) return; // Successful export is not a registry write.
+
     if (call.audio) {
         if (call.api == "waveInOpen" && result == 0 && call.args[0]) {
             auto expression = state->mem()->read(call.args[0], klee::Expr::Int32);
@@ -1704,7 +1733,8 @@ void FunctionCallLogger::onReturn(S2EExecutionState *state, const ModuleDescript
         return;
     if (call.api.find("RegOpenKey") == 0 || call.api.find("RegCreateKey") == 0) {
         uint32_t key;
-        unsigned index = call.api.find("RegOpenKey") == 0 ? 4 : 7;
+        unsigned index = (call.api == "RegOpenKeyA" || call.api == "RegOpenKeyW") ? 2 :
+                         (call.api.find("RegOpenKey") == 0 ? 4 : 7);
         if (read32(call.args[index], key) && (handles.size() < 4096 || handles.count(std::make_tuple(pid, lifetime, key))))
             handles[std::make_tuple(pid, lifetime, key)] = call.path;
         return;
