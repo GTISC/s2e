@@ -954,7 +954,11 @@ void FunctionCallLogger::recordLifecycle(S2EExecutionState *state, const Observe
         } else {
             out << ",\"stack_size\":" << call.args[2] << ",\"start_address\":" << call.args[3]
                 << ",\"parameter\":" << call.args[4] << ",\"creation_flags\":" << call.args[5]
-                << ",\"thread_id_address\":" << call.args[6];
+                << ",\"thread_id_address\":" << call.args[6]
+                << ",\"thread_start_module_hex\":\"" << inputHex(call.threadStartModule)
+                << "\",\"thread_start_symbol_hex\":\"" << inputHex(call.threadStartSymbol)
+                << "\",\"thread_start_module_base\":" << call.threadStartModuleBase
+                << ",\"thread_start_rva\":" << call.threadStartRva;
             if (returned) {
                 auto tid = call.args[6] ? dyn_cast_or_null<klee::ConstantExpr>(
                     state->mem()->read(call.args[6], klee::Expr::Int32)) : nullptr;
@@ -1056,6 +1060,33 @@ void FunctionCallLogger::onCall(S2EExecutionState *state, const ModuleDescriptor
     if (remoteProcess) {
         call.targetPid = s2e()->getPlugin<WindowsMonitor>()->getPidFromHandle(state, call.pid, call.args[0]);
         if (!call.targetPid || call.targetPid == call.pid) return;
+        if (call.api == "CreateRemoteThread") {
+            auto startModule = s2e()->getPlugin<ModuleMap>()->getModule(state, call.pid, call.args[3]);
+            if (startModule && call.args[3] >= startModule->LoadBase &&
+                call.args[3] - startModule->LoadBase <= UINT32_MAX) {
+                const auto startRva = uint32_t(call.args[3] - startModule->LoadBase);
+                const auto startKey = startModule->Path + ":" + startModule->Name;
+                auto startExports = m_exports.find(startKey);
+                if (startExports == m_exports.end()) {
+                    auto pe = std::dynamic_pointer_cast<vmi::PEFile>(
+                        m_vmi->getFromDisk(startModule->Path, startModule->Name, true));
+                    if (pe) {
+                        std::map<uint64_t, std::string> entries;
+                        for (const auto &entry : pe->getExports()) entries[entry.first] = entry.second;
+                        startExports = m_exports.emplace(startKey, std::move(entries)).first;
+                    }
+                }
+                if (startExports != m_exports.end()) {
+                    auto symbol = startExports->second.find(startRva);
+                    if (symbol != startExports->second.end()) {
+                        call.threadStartModule = startModule->Name;
+                        call.threadStartSymbol = symbol->second;
+                        call.threadStartModuleBase = startModule->LoadBase;
+                        call.threadStartRva = startRva;
+                    }
+                }
+            }
+        }
         if (call.api == "WriteProcessMemory") {
             call.requested = call.args[3];
             call.bufferConcrete = call.requested && call.args[2] &&
