@@ -37,6 +37,7 @@
 
 #include "IntervalMapWrapper.h"
 #include "MemoryMap.h"
+#include "MemoryMapRange.h"
 #include "RegionMap.h"
 
 namespace s2e {
@@ -239,9 +240,8 @@ void MemoryMap::addRegion(S2EExecutionState *state, uint64_t pid, uint64_t addre
 ///
 /// E.g., address==1 and size==2 => start==0 and end == 0x1000;
 ///
-static void ComputeStartEndAddress(uint64_t address, uint64_t size, uint64_t &start, uint64_t &end) {
-    start = address & TARGET_PAGE_MASK;
-    end = (address + size + (TARGET_PAGE_SIZE - 1)) & TARGET_PAGE_MASK;
+static bool ComputeStartEndAddress(uint64_t address, uint64_t size, uint64_t &start, uint64_t &end) {
+    return memoryMapPageRange(address, size, TARGET_PAGE_SIZE, start, end);
 }
 
 void MemoryMap::onLinuxMemoryMap(S2EExecutionState *state, uint64_t pid, uint64_t addr, uint64_t size, uint64_t prot) {
@@ -264,7 +264,10 @@ void MemoryMap::onLinuxMemoryMap(S2EExecutionState *state, uint64_t pid, uint64_
     }
 
     uint64_t start, end;
-    ComputeStartEndAddress(addr, size, start, end);
+    if (!ComputeStartEndAddress(addr, size, start, end)) {
+        getWarningsStream(state) << "Ignoring invalid Linux memory map range\n";
+        return;
+    }
 
     DECLARE_PLUGINSTATE(MemoryMapState, state);
     plgState->addRegion(pid, start, end, type);
@@ -275,7 +278,10 @@ void MemoryMap::onLinuxMemoryUnmap(S2EExecutionState *state, uint64_t pid, uint6
         return;
     }
     uint64_t start, end;
-    ComputeStartEndAddress(addr, size, start, end);
+    if (!ComputeStartEndAddress(addr, size, start, end)) {
+        getWarningsStream(state) << "Ignoring invalid Linux memory unmap range\n";
+        return;
+    }
 
     DECLARE_PLUGINSTATE(MemoryMapState, state);
     plgState->removeRegion(pid, start, end);
@@ -334,7 +340,10 @@ void MemoryMap::onNtAllocateVirtualMemory(S2EExecutionState *state, const S2E_WI
 
     uint64_t start;
     uint64_t end;
-    ComputeStartEndAddress(d.BaseAddress, d.Size, start, end);
+    if (!ComputeStartEndAddress(d.BaseAddress, d.Size, start, end)) {
+        getWarningsStream(state) << "Ignoring invalid NtAllocateVirtualMemory range\n";
+        return;
+    }
 
     MemoryMapRegionType type = WindowsProtectionToInternal(d.Protection);
     addRegion(state, real_pid, start, end, type);
@@ -364,7 +373,10 @@ void MemoryMap::onNtFreeVirtualMemory(S2EExecutionState *state, const S2E_WINMON
     if (d.FreeType & 0x8000 || d.FreeType & 0x4000) { // MEM_RELEASE || MEM_DECOMMIT
         uint64_t start;
         uint64_t end;
-        ComputeStartEndAddress(d.BaseAddress, d.Size, start, end);
+        if (!ComputeStartEndAddress(d.BaseAddress, d.Size, start, end)) {
+            getWarningsStream(state) << "Ignoring invalid NtFreeVirtualMemory range\n";
+            return;
+        }
 
         DECLARE_PLUGINSTATE(MemoryMapState, state);
         plgState->removeRegion(real_pid, start, end);
@@ -372,6 +384,12 @@ void MemoryMap::onNtFreeVirtualMemory(S2EExecutionState *state, const S2E_WINMON
 }
 
 void MemoryMap::onNtProtectVirtualMemory(S2EExecutionState *state, const S2E_WINMON2_PROTECT_VM &d) {
+    using namespace vmi::windows;
+    if (!NT_SUCCESS(d.Status)) {
+        getDebugStream(state) << "Ignoring failed NtProtectVirtualMemory status=" << hexval(d.Status)
+                             << " base=" << hexval(d.BaseAddress) << " size=" << hexval(d.Size) << "\n";
+        return;
+    }
     uint64_t pid = m_windows->getCurrentProcessId(state);
     assert(pid);
 
@@ -391,7 +409,10 @@ void MemoryMap::onNtProtectVirtualMemory(S2EExecutionState *state, const S2E_WIN
 
     uint64_t start;
     uint64_t end;
-    ComputeStartEndAddress(d.BaseAddress, d.Size, start, end);
+    if (!ComputeStartEndAddress(d.BaseAddress, d.Size, start, end)) {
+        getWarningsStream(state) << "Ignoring invalid NtProtectVirtualMemory range\n";
+        return;
+    }
 
     DECLARE_PLUGINSTATE(MemoryMapState, state);
     MemoryMapRegionType type = WindowsProtectionToInternal(d.NewProtection);
@@ -399,6 +420,12 @@ void MemoryMap::onNtProtectVirtualMemory(S2EExecutionState *state, const S2E_WIN
 }
 
 void MemoryMap::onNtMapViewOfSection(S2EExecutionState *state, const S2E_WINMON2_MAP_SECTION &d) {
+    using namespace vmi::windows;
+    if (!NT_SUCCESS(d.Status)) {
+        getDebugStream(state) << "Ignoring failed NtMapViewOfSection status=" << hexval(d.Status)
+                             << " base=" << hexval(d.BaseAddress) << " size=" << hexval(d.Size) << "\n";
+        return;
+    }
     uint64_t pid = m_windows->getCurrentProcessId(state);
     assert(pid);
 
@@ -418,7 +445,10 @@ void MemoryMap::onNtMapViewOfSection(S2EExecutionState *state, const S2E_WINMON2
 
     uint64_t start;
     uint64_t end;
-    ComputeStartEndAddress(d.BaseAddress, d.Size, start, end);
+    if (!ComputeStartEndAddress(d.BaseAddress, d.Size, start, end)) {
+        getWarningsStream(state) << "Ignoring invalid NtMapViewOfSection range\n";
+        return;
+    }
 
     DECLARE_PLUGINSTATE(MemoryMapState, state);
     MemoryMapRegionType type = WindowsProtectionToInternal(d.Win32Protect);
