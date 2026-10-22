@@ -1283,7 +1283,7 @@ void FunctionCallLogger::onCall(S2EExecutionState *state, const ModuleDescriptor
         {"WriteFile", 5},     {"CloseHandle", 1},     {"RegCloseKey", 1},     {"RegOpenKeyExA", 5},
         {"RegOpenKeyExW", 5}, {"RegOpenKeyA", 3}, {"RegOpenKeyW", 3},
         {"RegSaveKeyA", 3}, {"RegSaveKeyW", 3}, {"RegSaveKeyExA", 4}, {"RegSaveKeyExW", 4}, {"RegCreateKeyExA", 9}, {"RegCreateKeyExW", 9}, {"RegSetValueExA", 6},
-        {"RegSetValueExW", 6}, {"ReadFile", 5}, {"RegQueryValueExA", 6}, {"RegQueryValueExW", 6},
+        {"RegSetValueExW", 6}, {"RegDeleteValueA", 2}, {"RegDeleteValueW", 2}, {"ReadFile", 5}, {"RegQueryValueExA", 6}, {"RegQueryValueExW", 6},
         {"GetEnvironmentVariableA", 3}, {"GetEnvironmentVariableW", 3}, {"WideCharToMultiByte", 8},
         {"GetCommandLineA", 0}, {"GetCommandLineW", 0},
         {"GetProcAddress", 2},
@@ -1682,6 +1682,8 @@ void FunctionCallLogger::onCall(S2EExecutionState *state, const ModuleDescriptor
         if (call.path.empty() || !readText(call.args[1], subkey))
             return;
         call.path += "\\" + subkey;
+    } else if (call.api == "RegDeleteValueA" || call.api == "RegDeleteValueW") {
+        if (call.path.empty() || (call.args[1] && !readText(call.args[1], call.value))) return;
     } else if (call.api.find("RegSaveKey") == 0) {
         if (call.path.empty() || !readText(call.args[1], call.value)) return;
     } else if (call.api.find("RegSetValue") == 0) {
@@ -1745,6 +1747,7 @@ void FunctionCallLogger::onReturn(S2EExecutionState *state, const ModuleDescript
     if (!diagnostic) recordLifecycle(state, call, true, result);
     if (call.api == "CredEnumerateA" || call.api == "CredEnumerateW") return;
     if (call.api.find("RegSaveKey") == 0) return; // Successful export is not a registry write.
+    if (call.api == "RegDeleteValueA" || call.api == "RegDeleteValueW") return; // Removal is lifecycle evidence, never a value-write effect.
 
     if (call.audio) {
         if (call.api == "waveInOpen" && result == 0 && call.args[0]) {
