@@ -874,6 +874,7 @@ void FunctionCallLogger::recordCategory(S2EExecutionState *state, const Observed
         std::chrono::steady_clock::now().time_since_epoch()).count();
     const bool wallTime = call.api == "GetSystemTime" || call.api == "GetLocalTime";
     const bool fileTime = call.api == "GetSystemTimeAsFileTime" || call.api == "GetSystemTimePreciseAsFileTime";
+    const bool computerName = call.api == "GetComputerNameA" || call.api == "GetComputerNameW";
     const bool accountEnum = call.api == "NetUserEnum";
     const bool groupEnum = call.api == "NetGroupEnum" || call.api == "NetLocalGroupEnum";
     const bool enumerated = (accountEnum || groupEnum) && (result == 0 || result == 234);
@@ -893,6 +894,10 @@ void FunctionCallLogger::recordCategory(S2EExecutionState *state, const Observed
         out << call.args[i];
     }
     out << ']';
+    if (computerName) out << ",\"input_capacity\":" << call.requested;
+    if (accountEnum || groupEnum)
+        out << ",\"server_name_concrete\":" << (call.bufferConcrete ? "true" : "false")
+            << ",\"server_name_hex\":\"" << inputHex(call.data) << "\"";
     if (returned) {
         if (!voidResult) out << ",\"result\":" << result;
         out << ",\"outputs\":[";
@@ -913,6 +918,10 @@ void FunctionCallLogger::recordCategory(S2EExecutionState *state, const Observed
                 << ",\"hex\":\"" << inputHex(bytes) << "\"}";
         };
         if (wallTime || fileTime) output(0, wallTime ? 16 : 8);
+        if (computerName && result) {
+            output(0, call.api.back() == 'W' ? 32 : 16);
+            output(1, 4);
+        }
         if (call.api.find("GetDiskFreeSpaceEx") == 0 && result)
             for (unsigned i = 1; i <= 3; ++i) output(i, 8);
         if (call.api.find("GetVolumeInformation") == 0 && result)
@@ -1089,7 +1098,7 @@ void FunctionCallLogger::onCall(S2EExecutionState *state, const ModuleDescriptor
     const bool networkModule = dest->Name == "ws2_32.dll";
     const bool audioModule = dest->Name == "winmm.dll";
     if (dest->Name != "kernel32.dll" && dest->Name != "kernelbase.dll" && dest->Name != "advapi32.dll" &&
-        dest->Name != "user32.dll" && dest->Name != "netapi32.dll" && dest->Name != "samcli.dll" &&
+        dest->Name != "user32.dll" && dest->Name != "netapi32.dll" && dest->Name != "samcli.dll" && dest->Name != "wevtapi.dll" &&
         !(m_observeNetwork && networkModule) && !(m_observeAudio && audioModule))
         return;
     ObservedWindowsCall call;
@@ -1122,6 +1131,7 @@ void FunctionCallLogger::onCall(S2EExecutionState *state, const ModuleDescriptor
         {"GetLogicalDrives", 0}, {"GetDiskFreeSpaceExA", 4}, {"GetDiskFreeSpaceExW", 4},
         {"GetVolumeInformationA", 8}, {"GetVolumeInformationW", 8},
         {"keybd_event", 4}, {"mouse_event", 5}, {"SendInput", 3},
+        {"GetComputerNameA", 2}, {"GetComputerNameW", 2}, {"EvtClearLog", 4},
         {"NetGroupEnum", 7}, {"NetLocalGroupEnum", 7}, {"NetUserEnum", 8}};
     static const std::map<std::string, unsigned> supported = {
         {"CredEnumerateA", 4}, {"CredEnumerateW", 4},
@@ -1137,6 +1147,7 @@ void FunctionCallLogger::onCall(S2EExecutionState *state, const ModuleDescriptor
         {"GetLogicalDrives", 0}, {"GetDiskFreeSpaceExA", 4}, {"GetDiskFreeSpaceExW", 4},
         {"GetVolumeInformationA", 8}, {"GetVolumeInformationW", 8},
         {"keybd_event", 4}, {"mouse_event", 5}, {"SendInput", 3},
+        {"GetComputerNameA", 2}, {"GetComputerNameW", 2}, {"EvtClearLog", 4},
         {"NetGroupEnum", 7}, {"NetLocalGroupEnum", 7}, {"NetUserEnum", 8},
         {"GetFileAttributesA", 1}, {"GetFileAttributesW", 1}, {"FindFirstFileA", 2}, {"FindFirstFileW", 2},
         {"VirtualAllocEx", 5}, {"WriteProcessMemory", 5}, {"VirtualProtectEx", 5}, {"CreateRemoteThread", 7},
@@ -1247,7 +1258,7 @@ void FunctionCallLogger::onCall(S2EExecutionState *state, const ModuleDescriptor
         returnSignal->connect(sigc::bind(sigc::mem_fun(*this, &FunctionCallLogger::onReturn), call));
         return;
     }
-    const bool wide = call.api.back() == 'W';
+    const bool wide = call.api.back() == 'W' || call.api == "EvtClearLog";
     auto readText = [&](uint64_t address, std::string &text, unsigned bound = 512, bool boundedData = false) {
         if (!address)
             return false;
@@ -1270,6 +1281,27 @@ void FunctionCallLogger::onCall(S2EExecutionState *state, const ModuleDescriptor
         auto &counted = m_categoryCalls[s2e()->getCurrentInstanceIndex()];
         if (!call.recordEffect || call.diagnostic || counted >= 4096) return;
         call.path.clear();
+        if (call.api == "EvtClearLog" && !readText(call.args[1], call.path, 256)) return;
+        if (call.api == "GetComputerNameA" || call.api == "GetComputerNameW") {
+            if (!call.args[1] || uint64_t(call.args[1]) + 4 > (uint64_t(1) << 32)) return;
+            auto capacity = dyn_cast_or_null<klee::ConstantExpr>(state->mem()->read(call.args[1], klee::Expr::Int32));
+            if (!capacity || capacity->getZExtValue() < 16 || capacity->getZExtValue() > 256) return;
+            call.requested = capacity->getZExtValue();
+        }
+        if (call.api == "NetUserEnum" || call.api == "NetGroupEnum" || call.api == "NetLocalGroupEnum") {
+            call.bufferConcrete = !call.args[0];
+            if (call.args[0] && uint64_t(call.args[0]) + 256 <= (uint64_t(1) << 32)) {
+                for (unsigned i = 0; i < 128; ++i) {
+                    auto unit = dyn_cast_or_null<klee::ConstantExpr>(state->mem()->read(uint64_t(call.args[0]) + 2 * i, klee::Expr::Int16));
+                    if (!unit) break;
+                    const uint16_t value = unit->getZExtValue();
+                    call.data += char(value);
+                    call.data += char(value >> 8);
+                    if (!value) { call.bufferConcrete = true; break; }
+                }
+            }
+            if (!call.bufferConcrete) call.data.clear();
+        }
         if ((call.api.find("GetDriveType") == 0 || call.api.find("GetDiskFreeSpaceEx") == 0 ||
              call.api.find("GetVolumeInformation") == 0) && call.args[0] &&
             !readText(call.args[0], call.path)) return;
