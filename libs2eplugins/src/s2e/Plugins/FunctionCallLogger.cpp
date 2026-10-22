@@ -874,6 +874,9 @@ void FunctionCallLogger::recordCategory(S2EExecutionState *state, const Observed
         std::chrono::steady_clock::now().time_since_epoch()).count();
     const bool wallTime = call.api == "GetSystemTime" || call.api == "GetLocalTime";
     const bool fileTime = call.api == "GetSystemTimeAsFileTime" || call.api == "GetSystemTimePreciseAsFileTime";
+    const bool accountEnum = call.api == "NetUserEnum";
+    const bool groupEnum = call.api == "NetGroupEnum" || call.api == "NetLocalGroupEnum";
+    const bool enumerated = (accountEnum || groupEnum) && (result == 0 || result == 234);
     const bool voidResult = wallTime || fileTime || call.api == "keybd_event" || call.api == "mouse_event";
     std::ofstream out(s2e()->getOutputFilename("category-observations.jsonl"), std::ios::app);
     out << "{\"schema\":1,\"instance\":" << s2e()->getCurrentInstanceIndex()
@@ -914,7 +917,48 @@ void FunctionCallLogger::recordCategory(S2EExecutionState *state, const Observed
             for (unsigned i = 1; i <= 3; ++i) output(i, 8);
         if (call.api.find("GetVolumeInformation") == 0 && result)
             for (unsigned i = 3; i <= 5; ++i) output(i, 4);
+        if (enumerated) {
+            output(accountEnum ? 3 : 2, 4);
+            output(accountEnum ? 5 : 4, 4);
+            output(accountEnum ? 6 : 5, 4);
+        }
         out << ']';
+        if (enumerated) {
+            auto read32 = [&](uint32_t address, uint32_t &value) {
+                if (!address || uint64_t(address) + 4 > (uint64_t(1) << 32)) return false;
+                auto expression = state->mem()->read(address, klee::Expr::Int32);
+                auto constant = dyn_cast_or_null<klee::ConstantExpr>(expression);
+                if (!constant) return false;
+                value = constant->getZExtValue();
+                return true;
+            };
+            uint32_t buffer = 0, entries = 0, name = 0;
+            const bool bufferConcrete = read32(call.args[accountEnum ? 3 : 2], buffer);
+            const bool entryConcrete = bufferConcrete && read32(call.args[accountEnum ? 5 : 4], entries)
+                && entries && call.args[1] <= 1 && read32(buffer, name);
+            std::string firstEntry, firstName;
+            if (entryConcrete)
+                for (unsigned i = 0; i < 4; ++i) firstEntry += char(name >> (8 * i));
+            bool nameConcrete = false;
+            if (entryConcrete && name && uint64_t(name) + 256 <= (uint64_t(1) << 32)) {
+                for (unsigned i = 0; i < 128; ++i) {
+                    auto expression = state->mem()->read(uint64_t(name) + 2 * i, klee::Expr::Int16);
+                    auto constant = dyn_cast_or_null<klee::ConstantExpr>(expression);
+                    if (!constant) { firstName.clear(); break; }
+                    const uint16_t value = constant->getZExtValue();
+                    firstName += char(value);
+                    firstName += char(value >> 8);
+                    if (!value) { nameConcrete = true; break; }
+                }
+            }
+            if (!nameConcrete) firstName.clear();
+            out << ",\"enumeration\":{\"buffer_address\":" << buffer
+                << ",\"buffer_concrete\":" << (bufferConcrete ? "true" : "false")
+                << ",\"first_entry_hex\":\"" << inputHex(firstEntry)
+                << "\",\"first_entry_concrete\":" << (entryConcrete ? "true" : "false")
+                << ",\"first_name_address\":" << name << ",\"first_name_hex\":\"" << inputHex(firstName)
+                << "\",\"first_name_concrete\":" << (nameConcrete ? "true" : "false") << '}';
+        }
     }
     out << "}\n";
     out.close();
@@ -1045,7 +1089,7 @@ void FunctionCallLogger::onCall(S2EExecutionState *state, const ModuleDescriptor
     const bool networkModule = dest->Name == "ws2_32.dll";
     const bool audioModule = dest->Name == "winmm.dll";
     if (dest->Name != "kernel32.dll" && dest->Name != "kernelbase.dll" && dest->Name != "advapi32.dll" &&
-        dest->Name != "user32.dll" &&
+        dest->Name != "user32.dll" && dest->Name != "netapi32.dll" && dest->Name != "samcli.dll" &&
         !(m_observeNetwork && networkModule) && !(m_observeAudio && audioModule))
         return;
     ObservedWindowsCall call;
@@ -1077,7 +1121,8 @@ void FunctionCallLogger::onCall(S2EExecutionState *state, const ModuleDescriptor
         {"GetSystemTimePreciseAsFileTime", 1}, {"GetDriveTypeA", 1}, {"GetDriveTypeW", 1},
         {"GetLogicalDrives", 0}, {"GetDiskFreeSpaceExA", 4}, {"GetDiskFreeSpaceExW", 4},
         {"GetVolumeInformationA", 8}, {"GetVolumeInformationW", 8},
-        {"keybd_event", 4}, {"mouse_event", 5}, {"SendInput", 3}};
+        {"keybd_event", 4}, {"mouse_event", 5}, {"SendInput", 3},
+        {"NetGroupEnum", 7}, {"NetLocalGroupEnum", 7}, {"NetUserEnum", 8}};
     static const std::map<std::string, unsigned> supported = {
         {"CredEnumerateA", 4}, {"CredEnumerateW", 4},
         {"CreateFileA", 7},   {"CreateFileW", 7},     {"CopyFileA", 3},       {"CopyFileW", 3},
@@ -1092,6 +1137,7 @@ void FunctionCallLogger::onCall(S2EExecutionState *state, const ModuleDescriptor
         {"GetLogicalDrives", 0}, {"GetDiskFreeSpaceExA", 4}, {"GetDiskFreeSpaceExW", 4},
         {"GetVolumeInformationA", 8}, {"GetVolumeInformationW", 8},
         {"keybd_event", 4}, {"mouse_event", 5}, {"SendInput", 3},
+        {"NetGroupEnum", 7}, {"NetLocalGroupEnum", 7}, {"NetUserEnum", 8},
         {"GetFileAttributesA", 1}, {"GetFileAttributesW", 1}, {"FindFirstFileA", 2}, {"FindFirstFileW", 2},
         {"VirtualAllocEx", 5}, {"WriteProcessMemory", 5}, {"VirtualProtectEx", 5}, {"CreateRemoteThread", 7},
         {"socket", 3}, {"connect", 3}, {"bind", 3}, {"listen", 2}, {"accept", 3},
