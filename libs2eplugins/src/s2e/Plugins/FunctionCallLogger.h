@@ -56,6 +56,7 @@ struct ObservedWindowsCall {
     bool category = false;
     unsigned argumentCount = 0;
     uint32_t requested = 0;
+    uint32_t certificateEncoding = 0, certificateDataAddress = 0, certificateDataBytes = 0;
     uint32_t callId = 0, socket = 0, flags = 0, addressLength = 0;
     uint32_t listenerSocket = 0, acceptedSocket = 0, backlog = 0;
     uint32_t targetPid = 0, threadStartModuleBase = 0, threadStartRva = 0;

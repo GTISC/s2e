@@ -898,6 +898,17 @@ void FunctionCallLogger::recordCategory(S2EExecutionState *state, const Observed
     if (accountEnum || groupEnum)
         out << ",\"server_name_concrete\":" << (call.bufferConcrete ? "true" : "false")
             << ",\"server_name_hex\":\"" << inputHex(call.data) << "\"";
+    if (call.api == "SendInput" || call.api == "SetSecurityInfo")
+        out << ",\"input_buffer_concrete\":" << (call.bufferConcrete ? "true" : "false")
+            << ",\"input_buffer_hex\":\"" << inputHex(call.bufferPrefix) << "\"";
+    if (call.api == "CertAddEncodedCertificateToStore" || call.api == "CertAddCertificateContextToStore")
+        out << ",\"certificate_encoding\":" << call.certificateEncoding
+            << ",\"certificate_data_address\":" << call.certificateDataAddress
+            << ",\"certificate_data_bytes\":" << call.certificateDataBytes
+            << ",\"certificate_data_concrete\":" << (call.bufferConcrete ? "true" : "false")
+            << ",\"certificate_data_hex\":\"" << inputHex(call.bufferPrefix)
+            << "\",\"certificate_context_hex\":\"" << inputHex(call.data) << "\"";
+    if (call.api == "EvtQuery") out << ",\"query_hex\":\"" << inputHex(call.value) << "\"";
     if (returned) {
         if (!voidResult) out << ",\"result\":" << result;
         out << ",\"outputs\":[";
@@ -918,6 +929,11 @@ void FunctionCallLogger::recordCategory(S2EExecutionState *state, const Observed
                 << ",\"hex\":\"" << inputHex(bytes) << "\"}";
         };
         if (wallTime || fileTime) output(0, wallTime ? 16 : 8);
+        if ((call.api == "NtOpenFile" || call.api == "ZwOpenFile") && result == 0) {
+            output(0, 4);
+            output(3, 8);
+        }
+        if (call.api == "EvtNext" && result) { output(2, 4); output(5, 4); }
         if (computerName && result) {
             output(0, call.api.back() == 'W' ? 32 : 16);
             output(1, 4);
@@ -991,6 +1007,12 @@ void FunctionCallLogger::recordLifecycle(S2EExecutionState *state, const Observe
         << ",\"callee_pc\":" << call.calleePc << ",\"path_hex\":\"" << inputHex(call.path)
         << "\",\"value_hex\":\"" << inputHex(call.value) << "\",\"requested\":" << call.requested
         << ",\"input_capacity\":0";
+    if (call.api == "RegSetValueExA" || call.api == "RegSetValueExW") {
+        out << ",\"registry_type\":" << call.args[3]
+            << ",\"registry_data_address\":" << call.args[4] << ",\"registry_data_bytes\":" << call.args[5]
+            << ",\"registry_data_concrete\":" << (call.bufferConcrete ? "true" : "false")
+            << ",\"registry_data_hex\":\"" << inputHex(call.bufferPrefix) << "\"";
+    }
     const bool io = call.api == "ReadFile" || call.api == "WriteFile";
     if (io || call.api == "CloseHandle") out << ",\"handle\":" << call.args[0];
     if (call.api == "GetProcAddress") out << ",\"module_handle\":" << call.args[0];
@@ -1098,7 +1120,7 @@ void FunctionCallLogger::onCall(S2EExecutionState *state, const ModuleDescriptor
     const bool networkModule = dest->Name == "ws2_32.dll";
     const bool audioModule = dest->Name == "winmm.dll";
     if (dest->Name != "kernel32.dll" && dest->Name != "kernelbase.dll" && dest->Name != "advapi32.dll" &&
-        dest->Name != "user32.dll" && dest->Name != "netapi32.dll" && dest->Name != "samcli.dll" && dest->Name != "wevtapi.dll" &&
+        dest->Name != "user32.dll" && dest->Name != "netapi32.dll" && dest->Name != "samcli.dll" && dest->Name != "wevtapi.dll" && dest->Name != "ntdll.dll" && dest->Name != "crypt32.dll" &&
         !(m_observeNetwork && networkModule) && !(m_observeAudio && audioModule))
         return;
     ObservedWindowsCall call;
@@ -1131,7 +1153,11 @@ void FunctionCallLogger::onCall(S2EExecutionState *state, const ModuleDescriptor
         {"GetLogicalDrives", 0}, {"GetDiskFreeSpaceExA", 4}, {"GetDiskFreeSpaceExW", 4},
         {"GetVolumeInformationA", 8}, {"GetVolumeInformationW", 8},
         {"keybd_event", 4}, {"mouse_event", 5}, {"SendInput", 3},
-        {"GetComputerNameA", 2}, {"GetComputerNameW", 2}, {"EvtClearLog", 4},
+        {"GetComputerNameA", 2}, {"GetComputerNameW", 2}, {"EvtClearLog", 4}, {"EvtQuery", 4}, {"EvtNext", 6}, {"EvtClose", 1}, {"NtOpenFile", 6}, {"ZwOpenFile", 6},
+        {"NtClose", 1}, {"ZwClose", 1}, {"SetSecurityInfo", 7},
+        {"CertOpenStore", 5}, {"CertOpenSystemStoreA", 2}, {"CertOpenSystemStoreW", 2},
+        {"CertAddStoreToCollection", 4}, {"CertCloseStore", 2},
+        {"CertAddEncodedCertificateToStore", 6}, {"CertAddCertificateContextToStore", 4},
         {"NetGroupEnum", 7}, {"NetLocalGroupEnum", 7}, {"NetUserEnum", 8}};
     static const std::map<std::string, unsigned> supported = {
         {"CredEnumerateA", 4}, {"CredEnumerateW", 4},
@@ -1147,7 +1173,11 @@ void FunctionCallLogger::onCall(S2EExecutionState *state, const ModuleDescriptor
         {"GetLogicalDrives", 0}, {"GetDiskFreeSpaceExA", 4}, {"GetDiskFreeSpaceExW", 4},
         {"GetVolumeInformationA", 8}, {"GetVolumeInformationW", 8},
         {"keybd_event", 4}, {"mouse_event", 5}, {"SendInput", 3},
-        {"GetComputerNameA", 2}, {"GetComputerNameW", 2}, {"EvtClearLog", 4},
+        {"GetComputerNameA", 2}, {"GetComputerNameW", 2}, {"EvtClearLog", 4}, {"EvtQuery", 4}, {"EvtNext", 6}, {"EvtClose", 1}, {"NtOpenFile", 6}, {"ZwOpenFile", 6},
+        {"NtClose", 1}, {"ZwClose", 1}, {"SetSecurityInfo", 7},
+        {"CertOpenStore", 5}, {"CertOpenSystemStoreA", 2}, {"CertOpenSystemStoreW", 2},
+        {"CertAddStoreToCollection", 4}, {"CertCloseStore", 2},
+        {"CertAddEncodedCertificateToStore", 6}, {"CertAddCertificateContextToStore", 4},
         {"NetGroupEnum", 7}, {"NetLocalGroupEnum", 7}, {"NetUserEnum", 8},
         {"GetFileAttributesA", 1}, {"GetFileAttributesW", 1}, {"FindFirstFileA", 2}, {"FindFirstFileW", 2},
         {"VirtualAllocEx", 5}, {"WriteProcessMemory", 5}, {"VirtualProtectEx", 5}, {"CreateRemoteThread", 7},
@@ -1258,7 +1288,8 @@ void FunctionCallLogger::onCall(S2EExecutionState *state, const ModuleDescriptor
         returnSignal->connect(sigc::bind(sigc::mem_fun(*this, &FunctionCallLogger::onReturn), call));
         return;
     }
-    const bool wide = call.api.back() == 'W' || call.api == "EvtClearLog";
+    const bool wide = call.api.back() == 'W' || call.api == "EvtClearLog" || call.api == "EvtQuery" || call.api == "NtOpenFile" || call.api == "ZwOpenFile" ||
+        (call.api == "CertOpenStore" && (call.args[0] == 10 || call.args[0] == 13));
     auto readText = [&](uint64_t address, std::string &text, unsigned bound = 512, bool boundedData = false) {
         if (!address)
             return false;
@@ -1282,6 +1313,75 @@ void FunctionCallLogger::onCall(S2EExecutionState *state, const ModuleDescriptor
         if (!call.recordEffect || call.diagnostic || counted >= 4096) return;
         call.path.clear();
         if (call.api == "EvtClearLog" && !readText(call.args[1], call.path, 256)) return;
+        if (call.api == "EvtQuery") {
+            if (!readText(call.args[1], call.path, 256) || (call.args[2] && !readText(call.args[2], call.value, 512))) return;
+        }
+
+        if (call.api == "CertOpenSystemStoreA" || call.api == "CertOpenSystemStoreW") {
+            if (!readText(call.args[1], call.path, 128)) return;
+        }
+        if (call.api == "CertOpenStore" && (call.args[0] == 9 || call.args[0] == 10 || call.args[0] == 12 || call.args[0] == 13)) {
+            if (!readText(call.args[4], call.path, 128)) return;
+        }
+        if (call.api == "CertAddEncodedCertificateToStore" || call.api == "CertAddCertificateContextToStore") {
+            const bool context = call.api == "CertAddCertificateContextToStore";
+            bool input = true;
+            if (context) {
+                input = call.args[1] && uint64_t(call.args[1]) + 20 <= (uint64_t(1) << 32)
+                    && read32(call.args[1], call.certificateEncoding)
+                    && read32(call.args[1] + 4, call.certificateDataAddress)
+                    && read32(call.args[1] + 8, call.certificateDataBytes);
+                for (uint32_t i = 0; input && i < 20; ++i) {
+                    auto byte = dyn_cast_or_null<klee::ConstantExpr>(state->mem()->read(uint64_t(call.args[1]) + i, klee::Expr::Int8));
+                    if (!byte) { input = false; break; }
+                    call.data += char(byte->getZExtValue());
+                }
+            } else {
+                call.certificateEncoding = call.args[1];
+                call.certificateDataAddress = call.args[2];
+                call.certificateDataBytes = call.args[3];
+            }
+            call.bufferConcrete = input && call.certificateDataAddress && call.certificateDataBytes && call.certificateDataBytes <= 4096
+                && uint64_t(call.certificateDataAddress) + call.certificateDataBytes <= (uint64_t(1) << 32);
+            for (uint32_t i = 0; call.bufferConcrete && i < call.certificateDataBytes; ++i) {
+                auto byte = dyn_cast_or_null<klee::ConstantExpr>(state->mem()->read(uint64_t(call.certificateDataAddress) + i, klee::Expr::Int8));
+                if (!byte) { call.bufferConcrete = false; break; }
+                call.bufferPrefix += char(byte->getZExtValue());
+            }
+            if (!call.bufferConcrete) { call.bufferPrefix.clear(); call.data.clear(); }
+        }
+
+        if (call.api == "NtOpenFile" || call.api == "ZwOpenFile") {
+            uint32_t length = 0, root = 0, objectName = 0, sizes = 0, buffer = 0;
+            if (!call.args[2] || uint64_t(call.args[2]) + 24 > (uint64_t(1) << 32)
+                || !read32(call.args[2], length) || length != 24
+                || !read32(call.args[2] + 4, root) || root
+                || !read32(call.args[2] + 8, objectName) || !objectName
+                || uint64_t(objectName) + 8 > (uint64_t(1) << 32)
+                || !read32(objectName, sizes) || !read32(objectName + 4, buffer)
+                || !(sizes & 0xffff) || (sizes & 1) || (sizes & 0xffff) > (sizes >> 16)
+                || (sizes & 0xffff) > 512 || uint64_t(buffer) + (sizes & 0xffff) > (uint64_t(1) << 32)
+                || !readText(buffer, call.path, (sizes & 0xffff) / 2, true)
+                || call.path.size() != (sizes & 0xffff) / 2) return;
+        }
+        if (call.api == "SendInput" || call.api == "SetSecurityInfo") {
+            uint32_t address = call.api == "SendInput" ? call.args[1] : call.args[5], size = 0;
+            if (call.api == "SendInput") {
+                if (call.args[0] && call.args[0] <= 8 && call.args[2] == 28) size = 28 * call.args[0];
+            } else {
+                uint32_t header = 0;
+                if (address && uint64_t(address) + 8 <= (uint64_t(1) << 32) && read32(address, header)
+                    && ((header & 0xff) == 2 || (header & 0xff) == 4)
+                    && (header >> 16) >= 8 && (header >> 16) <= 1024) size = header >> 16;
+            }
+            call.bufferConcrete = address && size && uint64_t(address) + size <= (uint64_t(1) << 32);
+            for (uint32_t i = 0; call.bufferConcrete && i < size; ++i) {
+                auto byte = dyn_cast_or_null<klee::ConstantExpr>(state->mem()->read(uint64_t(address) + i, klee::Expr::Int8));
+                if (!byte) { call.bufferConcrete = false; call.bufferPrefix.clear(); break; }
+                call.bufferPrefix += char(byte->getZExtValue());
+            }
+        }
+
         if (call.api == "GetComputerNameA" || call.api == "GetComputerNameW") {
             if (!call.args[1] || uint64_t(call.args[1]) + 4 > (uint64_t(1) << 32)) return;
             auto capacity = dyn_cast_or_null<klee::ConstantExpr>(state->mem()->read(call.args[1], klee::Expr::Int32));
@@ -1367,6 +1467,14 @@ void FunctionCallLogger::onCall(S2EExecutionState *state, const ModuleDescriptor
     } else if (call.api.find("RegSetValue") == 0) {
         if (call.path.empty() || (call.args[1] && !readText(call.args[1], call.value)))
             return;
+        // Keep entry-bound typed bytes separate from the legacy ASCII string view.
+        call.bufferConcrete = call.args[4] && call.args[5] && call.args[5] <= 2048 &&
+            uint64_t(call.args[4]) + call.args[5] <= (uint64_t(1) << 32);
+        for (uint32_t i = 0; call.bufferConcrete && i < call.args[5]; ++i) {
+            auto byte = dyn_cast_or_null<klee::ConstantExpr>(state->mem()->read(uint64_t(call.args[4]) + i, klee::Expr::Int8));
+            if (!byte) { call.bufferConcrete = false; call.bufferPrefix.clear(); break; }
+            call.bufferPrefix += char(byte->getZExtValue());
+        }
         if (call.args[3] == 1 || call.args[3] == 2) {
             unsigned width = wide ? 2 : 1;
             if (call.args[5] % width || call.args[5] / width > 512 ||
@@ -1557,7 +1665,12 @@ void FunctionCallLogger::onReturn(S2EExecutionState *state, const ModuleDescript
         << call.api << "\",\"path_hex\":\"" << hex(call.path) << "\",\"value_hex\":\"" << hex(call.value)
         << "\",\"data_hex\":\"" << hex(call.data) << "\",\"bytes_written\":" << bytes
         << ",\"buffer_prefix_hex\":\"" << hex(bufferPrefix) << "\",\"buffer_prefix_bytes\":" << bufferPrefix.size()
-        << ",\"registry_type\":" << (registry ? call.args[3] : 0) << ",\"return_value\":" << result << "}\n";
+        << ",\"registry_type\":" << (registry ? call.args[3] : 0) << ",\"return_value\":" << result;
+    if (registry)
+        out << ",\"registry_data_address\":" << call.args[4] << ",\"registry_data_bytes\":" << call.args[5]
+            << ",\"registry_data_concrete\":" << (call.bufferConcrete ? "true" : "false")
+            << ",\"registry_data_hex\":\"" << hex(call.bufferPrefix) << "\"";
+    out << "}\n";
     out.close();
     if (!out)
         getWarningsStream(state) << "Could not persist Windows effect evidence\n";
