@@ -940,7 +940,8 @@ void FunctionCallLogger::recordCategory(S2EExecutionState *state, const Observed
         out << ",\"admin_input_concrete\":" << (call.bufferConcrete ? "true" : "false")
             << ",\"admin_input_hex\":\"" << inputHex(call.bufferPrefix)
             << "\",\"subject_name_hex\":\"" << inputHex(call.value) << "\",\"input_subject_address\":" << call.requested;
-    if (call.api == "GetExtendedTcpTable" || call.api == "SetupDiEnumDeviceInfo")
+    if (call.api == "GetExtendedTcpTable" || call.api == "SetupDiEnumDeviceInfo" ||
+        call.api == "EnumDisplayDevicesA" || call.api == "EnumDisplayDevicesW")
         out << ",\"input_capacity\":" << call.requested;
     if (call.api == "SendInput" || call.api == "SetSecurityInfo")
         out << ",\"input_buffer_concrete\":" << (call.bufferConcrete ? "true" : "false")
@@ -975,6 +976,10 @@ void FunctionCallLogger::recordCategory(S2EExecutionState *state, const Observed
         if (processCreate && result) output(call.api == "CreateProcessWithTokenW" ? 8 :
             (call.api == "CreateProcessAsUserA" || call.api == "CreateProcessAsUserW" ? 10 : 9), 16);
         if (call.api == "SetupDiEnumDeviceInfo" && result) output(2, 28);
+        // DISPLAY_DEVICE semantic prefix ends with StateFlags; reserved ID/key fields
+        // are deliberately excluded. Full structure cb is still validated at entry.
+        if ((call.api == "EnumDisplayDevicesA" || call.api == "EnumDisplayDevicesW") && result)
+            output(2, call.api.back() == 'W' ? 328 : 168);
         if (call.api == "GetExtendedTcpTable" && result == 0) output(1, 4);
         if (call.api == "NetUserModalsGet" && result == 0) output(2, 4);
         if (call.api == "NetScheduleJobAdd" && result == 0) output(2, 4);
@@ -1327,6 +1332,7 @@ void FunctionCallLogger::onCall(S2EExecutionState *state, const ModuleDescriptor
         {"NetUserGetInfo", 4}, {"NetUserDel", 2},
         {"PowerGetActiveScheme", 2}, {"PowerWriteACValueIndex", 5}, {"PowerSetActiveScheme", 2},
         {"NetScheduleJobAdd", 3},
+        {"EnumDisplayDevicesA", 4}, {"EnumDisplayDevicesW", 4},
         {"OpenSCManagerA", 3}, {"OpenSCManagerW", 3}, {"CreateServiceA", 13}, {"CreateServiceW", 13},
         {"OpenServiceA", 3}, {"OpenServiceW", 3}, {"StartServiceA", 3}, {"StartServiceW", 3},
         {"QueryServiceStatus", 2}, {"QueryServiceStatusEx", 5}, {"CloseServiceHandle", 1},
@@ -1361,6 +1367,7 @@ void FunctionCallLogger::onCall(S2EExecutionState *state, const ModuleDescriptor
         {"NetUserGetInfo", 4}, {"NetUserDel", 2},
         {"PowerGetActiveScheme", 2}, {"PowerWriteACValueIndex", 5}, {"PowerSetActiveScheme", 2},
         {"NetScheduleJobAdd", 3},
+        {"EnumDisplayDevicesA", 4}, {"EnumDisplayDevicesW", 4},
         {"OpenSCManagerA", 3}, {"OpenSCManagerW", 3}, {"CreateServiceA", 13}, {"CreateServiceW", 13},
         {"OpenServiceA", 3}, {"OpenServiceW", 3}, {"StartServiceA", 3}, {"StartServiceW", 3},
         {"QueryServiceStatus", 2}, {"QueryServiceStatusEx", 5}, {"CloseServiceHandle", 1},
@@ -1695,6 +1702,12 @@ void FunctionCallLogger::onCall(S2EExecutionState *state, const ModuleDescriptor
         }
         if (call.api == "GetExtendedTcpTable") {
             if (!call.args[1] || !read32(call.args[1], call.requested)) return;
+        }
+        if (call.api == "EnumDisplayDevicesA" || call.api == "EnumDisplayDevicesW") {
+            if ((call.args[0] && !readText(call.args[0], call.path, 32)) ||
+                !call.args[2] || !read32(call.args[2], call.requested) ||
+                call.requested != (call.api.back() == 'W' ? 840 : 424) ||
+                uint64_t(call.args[2]) + call.requested > (uint64_t(1) << 32)) return;
         }
         if (call.api == "SetupDiEnumDeviceInfo") {
             if (!call.args[2] || !read32(call.args[2], call.requested) || call.requested != 28) return;
