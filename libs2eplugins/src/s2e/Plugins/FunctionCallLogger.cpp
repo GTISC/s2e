@@ -881,7 +881,7 @@ void FunctionCallLogger::recordCategory(S2EExecutionState *state, const Observed
     const bool accountEnum = call.api == "NetUserEnum";
     const bool groupEnum = call.api == "NetGroupEnum" || call.api == "NetLocalGroupEnum";
     const bool enumerated = (accountEnum || groupEnum) && (result == 0 || result == 234);
-    const bool voidResult = wallTime || fileTime || call.api == "keybd_event" || call.api == "mouse_event";
+    const bool voidResult = wallTime || fileTime || call.api == "keybd_event" || call.api == "mouse_event" || call.api == "DeleteProcThreadAttributeList";
     std::ofstream out(s2e()->getOutputFilename("category-observations.jsonl"), std::ios::app);
     out << "{\"schema\":1,\"instance\":" << s2e()->getCurrentInstanceIndex()
         << ",\"state\":" << state->getID() << ",\"pid\":" << call.pid
@@ -901,6 +901,16 @@ void FunctionCallLogger::recordCategory(S2EExecutionState *state, const Observed
     if (accountEnum || groupEnum)
         out << ",\"server_name_concrete\":" << (call.bufferConcrete ? "true" : "false")
             << ",\"server_name_hex\":\"" << inputHex(call.data) << "\"";
+    const bool processCreate = call.api == "CreateProcessA" || call.api == "CreateProcessW" ||
+        call.api == "CreateProcessAsUserA" || call.api == "CreateProcessAsUserW" || call.api == "CreateProcessWithTokenW";
+    if (processCreate)
+        out << ",\"process_command_line_hex\":\"" << inputHex(call.value)
+            << "\",\"process_startup_info_concrete\":" << (call.bufferConcrete ? "true" : "false")
+            << ",\"process_startup_info_hex\":\"" << inputHex(call.bufferPrefix) << "\"";
+    if (call.api == "UpdateProcThreadAttribute")
+        out << ",\"parent_attribute_concrete\":" << (call.bufferConcrete ? "true" : "false")
+            << ",\"parent_attribute_value_hex\":\"" << inputHex(call.bufferPrefix)
+            << "\",\"requested_parent_pid\":" << call.targetPid;
     if (call.api == "_write")
         out << ",\"crt_buffer_address\":" << call.args[1]
             << ",\"crt_buffer_concrete\":" << (call.bufferConcrete ? "true" : "false")
@@ -951,6 +961,8 @@ void FunctionCallLogger::recordCategory(S2EExecutionState *state, const Observed
                 << ",\"size\":" << size << ",\"concrete\":" << (concrete ? "true" : "false")
                 << ",\"hex\":\"" << inputHex(bytes) << "\"}";
         };
+        if (processCreate && result) output(call.api == "CreateProcessWithTokenW" ? 8 :
+            (call.api == "CreateProcessAsUserA" || call.api == "CreateProcessAsUserW" ? 10 : 9), 16);
         if (call.api == "SetupDiEnumDeviceInfo" && result) output(2, 28);
         if (call.api == "GetExtendedTcpTable" && result == 0) output(1, 4);
         if (call.api == "NetUserModalsGet" && result == 0) output(2, 4);
@@ -974,6 +986,30 @@ void FunctionCallLogger::recordCategory(S2EExecutionState *state, const Observed
             output(accountEnum ? 6 : 5, 4);
         }
         out << "]";
+        if (processCreate) {
+            const unsigned index = call.api == "CreateProcessWithTokenW" ? 8 :
+                (call.api == "CreateProcessAsUserA" || call.api == "CreateProcessAsUserW" ? 10 : 9);
+            auto readInfo32 = [&](unsigned offset, uint32_t &value) {
+                if (!result || !call.args[index] || uint64_t(call.args[index]) + 16 > (uint64_t(1) << 32)) return false;
+                auto c = dyn_cast_or_null<klee::ConstantExpr>(state->mem()->read(uint64_t(call.args[index]) + offset, klee::Expr::Int32));
+                if (!c) return false;
+                value = c->getZExtValue(); return true;
+            };
+            uint32_t child = 0, handle = 0, parent = 0, handlePid = 0;
+            auto monitor = s2e()->getPlugin<WindowsMonitor>();
+            bool known = readInfo32(8, child) && child && child != call.pid && readInfo32(0, handle) && handle;
+            if (known) {
+                uint64_t object = monitor->getProcess(state, child), owner = monitor->getProcessParent(state, child);
+                known = object && object != UINT64_MAX && owner && owner <= UINT32_MAX;
+                if (known) parent = owner;
+                const uint64_t resolved = monitor->getPidFromHandle(state, call.pid, handle);
+                if (resolved <= UINT32_MAX) handlePid = resolved;
+            }
+            out << ",\"created_process_kernel_confirmed\":" << (known ? "true" : "false")
+                << ",\"created_process_parent_pid\":" << parent
+                << ",\"created_process_handle_pid\":" << handlePid;
+        }
+
         if (call.api == "NetUserModalsGet" || call.api == "GetExtendedTcpTable") {
             uint32_t address = 0, size = 0;
             auto readConcrete32 = [&](uint64_t p, uint32_t &v) {
@@ -1236,6 +1272,9 @@ void FunctionCallLogger::onCall(S2EExecutionState *state, const ModuleDescriptor
         {"NetUserAdd", 4}, {"NetLocalGroupAddMembers", 5}, {"NetUserModalsGet", 3},
         {"SetFileAttributesA", 2}, {"SetFileAttributesW", 2}, {"GetExtendedTcpTable", 6}, {"SetupDiEnumDeviceInfo", 3},
         {"DllRegisterServer", 0},
+        {"CreateProcessAsUserA", 11}, {"CreateProcessAsUserW", 11}, {"CreateProcessWithTokenW", 9},
+        {"CreateProcessA", 10}, {"CreateProcessW", 10}, {"InitializeProcThreadAttributeList", 4},
+        {"UpdateProcThreadAttribute", 7}, {"DeleteProcThreadAttributeList", 1}, {"GetLastError", 0},
         {"_open", 2}, {"_write", 3}, {"_close", 1},
         {"NetGroupEnum", 7}, {"NetLocalGroupEnum", 7}, {"NetUserEnum", 8}};
     static const std::map<std::string, unsigned> supported = {
@@ -1261,6 +1300,9 @@ void FunctionCallLogger::onCall(S2EExecutionState *state, const ModuleDescriptor
         {"NetUserAdd", 4}, {"NetLocalGroupAddMembers", 5}, {"NetUserModalsGet", 3},
         {"SetFileAttributesA", 2}, {"SetFileAttributesW", 2}, {"GetExtendedTcpTable", 6}, {"SetupDiEnumDeviceInfo", 3},
         {"DllRegisterServer", 0},
+        {"CreateProcessAsUserA", 11}, {"CreateProcessAsUserW", 11}, {"CreateProcessWithTokenW", 9},
+        {"CreateProcessA", 10}, {"CreateProcessW", 10}, {"InitializeProcThreadAttributeList", 4},
+        {"UpdateProcThreadAttribute", 7}, {"DeleteProcThreadAttributeList", 1}, {"GetLastError", 0},
         {"_open", 2}, {"_write", 3}, {"_close", 1},
         {"NetGroupEnum", 7}, {"NetLocalGroupEnum", 7}, {"NetUserEnum", 8},
         {"GetFileAttributesA", 1}, {"GetFileAttributesW", 1}, {"FindFirstFileA", 2}, {"FindFirstFileW", 2},
@@ -1289,6 +1331,7 @@ void FunctionCallLogger::onCall(S2EExecutionState *state, const ModuleDescriptor
         value = c->getZExtValue();
         return true;
     };
+    if (count->second > sizeof(call.args) / sizeof(call.args[0])) return;
     for (unsigned i = 0; i < count->second; ++i)
         if (!read32(state->regs()->getSp() + 4 * (i + 1), call.args[i]))
             return;
@@ -1398,6 +1441,35 @@ void FunctionCallLogger::onCall(S2EExecutionState *state, const ModuleDescriptor
         auto &counted = m_categoryCalls[s2e()->getCurrentInstanceIndex()];
         if ((!call.recordEffect && call.api != "_close") || call.diagnostic || counted >= 4096) return;
         call.path.clear();
+        const bool processCreate = call.api == "CreateProcessA" || call.api == "CreateProcessW" ||
+            call.api == "CreateProcessAsUserA" || call.api == "CreateProcessAsUserW" || call.api == "CreateProcessWithTokenW";
+        if (processCreate) {
+            const bool user = call.api == "CreateProcessAsUserA" || call.api == "CreateProcessAsUserW";
+            const bool token = call.api == "CreateProcessWithTokenW";
+            const unsigned app = token ? 2 : (user ? 1 : 0), cmd = app + 1;
+            const unsigned startup = token ? 7 : (user ? 9 : 8), flags = token ? 4 : (user ? 6 : 5);
+            if ((call.args[app] && !readText(call.args[app], call.path)) ||
+                (call.args[cmd] && !readText(call.args[cmd], call.value))) return;
+            const uint32_t size = call.args[flags] & 0x80000 ? 72 : 68;
+            uint32_t cb = 0;
+            call.bufferConcrete = call.args[startup] && uint64_t(call.args[startup]) + size <= (uint64_t(1) << 32)
+                && read32(call.args[startup], cb) && cb == size;
+            for (uint32_t j = 0; call.bufferConcrete && j < size; ++j) {
+                auto c = dyn_cast_or_null<klee::ConstantExpr>(state->mem()->read(uint64_t(call.args[startup]) + j, klee::Expr::Int8));
+                if (!c) { call.bufferConcrete = false; call.bufferPrefix.clear(); break; }
+                call.bufferPrefix += char(c->getZExtValue());
+            }
+        }
+        if (call.api == "UpdateProcThreadAttribute") {
+            uint32_t parentHandle = 0;
+            call.bufferConcrete = call.args[2] == 0x20000 && call.args[4] == 4 && call.args[3] &&
+                uint64_t(call.args[3]) + 4 <= (uint64_t(1) << 32) && read32(call.args[3], parentHandle);
+            if (call.bufferConcrete) {
+                for (unsigned j = 0; j < 4; ++j) call.bufferPrefix += char(parentHandle >> (8 * j));
+                uint64_t parent = s2e()->getPlugin<WindowsMonitor>()->getPidFromHandle(state, call.pid, parentHandle);
+                if (parent <= UINT32_MAX) call.targetPid = parent;
+            }
+        }
         if (call.api == "_open" && !readText(call.args[0], call.path)) return;
         if (call.api == "_write") {
             call.requested = std::min(call.args[2], uint32_t(4096));
@@ -1662,7 +1734,7 @@ void FunctionCallLogger::onReturn(S2EExecutionState *state, const ModuleDescript
         uint32_t categoryResult = 0;
         const bool voidResult = call.api == "GetSystemTime" || call.api == "GetLocalTime" ||
             call.api == "GetSystemTimeAsFileTime" || call.api == "GetSystemTimePreciseAsFileTime" ||
-            call.api == "keybd_event" || call.api == "mouse_event";
+            call.api == "keybd_event" || call.api == "mouse_event" || call.api == "DeleteProcThreadAttributeList";
         if (!voidResult && !state->regs()->read(CPU_OFFSET(regs[R_EAX]), &categoryResult, 4, false)) return;
         if (!diagnostic) recordCategory(state, call, true, categoryResult);
         return;
