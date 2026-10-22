@@ -916,6 +916,50 @@ void FunctionCallLogger::recordLifecycle(S2EExecutionState *state, const Observe
                 << ",\"credential_output_concrete\":" << (valid ? "true" : "false");
         }
     }
+    const bool remoteProcess = call.api == "VirtualAllocEx" || call.api == "WriteProcessMemory" ||
+                               call.api == "VirtualProtectEx" || call.api == "CreateRemoteThread";
+    if (remoteProcess) {
+        out << ",\"process_handle\":" << call.args[0] << ",\"target_pid\":" << call.targetPid;
+        if (call.api == "VirtualAllocEx") {
+            out << ",\"requested_base\":" << call.args[1] << ",\"region_size\":" << call.args[2]
+                << ",\"allocation_type\":" << call.args[3] << ",\"protection\":" << call.args[4];
+            if (returned) out << ",\"remote_base\":" << result;
+        } else if (call.api == "WriteProcessMemory") {
+            out << ",\"remote_base\":" << call.args[1] << ",\"source_buffer\":" << call.args[2]
+                << ",\"bytes_written_address\":" << call.args[4]
+                << ",\"buffer_prefix_hex\":\"" << inputHex(call.bufferPrefix)
+                << "\",\"buffer_prefix_concrete\":" << (call.bufferConcrete ? "true" : "false")
+                << ",\"buffer_prefix_bytes\":" << call.bufferPrefix.size();
+            if (returned) {
+                auto count = call.args[4] ? dyn_cast_or_null<klee::ConstantExpr>(
+                    state->mem()->read(call.args[4], klee::Expr::Int32)) : nullptr;
+                const bool valid = result && count && count->getZExtValue() <= call.args[3];
+                out << ",\"bytes_written_concrete\":" << (valid ? "true" : "false")
+                    << ",\"bytes_written\":" << (valid ? count->getZExtValue() : 0);
+            }
+        } else if (call.api == "VirtualProtectEx") {
+            out << ",\"remote_base\":" << call.args[1] << ",\"region_size\":" << call.args[2]
+                << ",\"protection\":" << call.args[3]
+                << ",\"old_protection_address\":" << call.args[4];
+            if (returned) {
+                auto old = call.args[4] ? dyn_cast_or_null<klee::ConstantExpr>(
+                    state->mem()->read(call.args[4], klee::Expr::Int32)) : nullptr;
+                const bool valid = result && old;
+                out << ",\"old_protection_concrete\":" << (valid ? "true" : "false")
+                    << ",\"old_protection\":" << (valid ? old->getZExtValue() : 0);
+            }
+        } else {
+            out << ",\"stack_size\":" << call.args[2] << ",\"start_address\":" << call.args[3]
+                << ",\"parameter\":" << call.args[4] << ",\"creation_flags\":" << call.args[5]
+                << ",\"thread_id_address\":" << call.args[6];
+            if (returned) {
+                auto tid = call.args[6] ? dyn_cast_or_null<klee::ConstantExpr>(
+                    state->mem()->read(call.args[6], klee::Expr::Int32)) : nullptr;
+                out << ",\"thread_id_concrete\":" << (result && tid ? "true" : "false")
+                    << ",\"thread_id\":" << (result && tid ? tid->getZExtValue() : 0);
+            }
+        }
+    }
     if (call.api.find("CreateFile") == 0)
         out << ",\"desired_access\":" << call.args[1] << ",\"creation_disposition\":" << call.args[4]
             << ",\"file_flags\":" << call.args[5];
@@ -975,6 +1019,7 @@ void FunctionCallLogger::onCall(S2EExecutionState *state, const ModuleDescriptor
         {"GetEnvironmentVariableA", 3}, {"GetEnvironmentVariableW", 3}, {"WideCharToMultiByte", 8},
         {"GetCommandLineA", 0}, {"GetCommandLineW", 0},
         {"GetFileAttributesA", 1}, {"GetFileAttributesW", 1}, {"FindFirstFileA", 2}, {"FindFirstFileW", 2},
+        {"VirtualAllocEx", 5}, {"WriteProcessMemory", 5}, {"VirtualProtectEx", 5}, {"CreateRemoteThread", 7},
         {"socket", 3}, {"connect", 3}, {"bind", 3}, {"listen", 2}, {"accept", 3},
         {"send", 4}, {"recv", 4}, {"closesocket", 1},
         {"waveInOpen", 6}, {"waveInPrepareHeader", 3}, {"waveInAddBuffer", 3},
@@ -1002,6 +1047,28 @@ void FunctionCallLogger::onCall(S2EExecutionState *state, const ModuleDescriptor
     for (unsigned i = 0; i < count->second; ++i)
         if (!read32(state->regs()->getSp() + 4 * (i + 1), call.args[i]))
             return;
+    const bool remoteProcess = call.api == "VirtualAllocEx" || call.api == "WriteProcessMemory" ||
+                               call.api == "VirtualProtectEx" || call.api == "CreateRemoteThread";
+    if (remoteProcess) {
+        call.targetPid = s2e()->getPlugin<WindowsMonitor>()->getPidFromHandle(state, call.pid, call.args[0]);
+        if (!call.targetPid || call.targetPid == call.pid) return;
+        if (call.api == "WriteProcessMemory") {
+            call.requested = call.args[3];
+            call.bufferConcrete = call.requested && call.args[2] &&
+                                  uint64_t(call.args[2]) + std::min(call.requested, uint32_t(512)) <=
+                                      (uint64_t(1) << 32);
+            for (uint32_t i = 0; call.bufferConcrete && i < std::min(call.requested, uint32_t(512)); ++i) {
+                auto byte = dyn_cast_or_null<klee::ConstantExpr>(
+                    state->mem()->read(uint64_t(call.args[2]) + i, klee::Expr::Int8));
+                if (!byte) {
+                    call.bufferConcrete = false;
+                    call.bufferPrefix.clear();
+                    break;
+                }
+                call.bufferPrefix += static_cast<char>(byte->getZExtValue());
+            }
+        }
+    }
     if (audioModule) {
         if (!m_observeAudio || !source || call.diagnostic || !call.recordEffect || m_audioCalls >= 64)
             return;
@@ -1108,7 +1175,7 @@ void FunctionCallLogger::onCall(S2EExecutionState *state, const ModuleDescriptor
     }
     // Track only direct non-DLL calls in the causally monitored process tree.
     // File handles stay state/PID/lifetime local in the existing observer map.
-    bool tracked = call.api.find("CredEnumerate") == 0 || call.api.find("Reg") == 0 || call.api == "ReadFile" || call.api == "WriteFile" ||
+    bool tracked = call.api.find("CredEnumerate") == 0 || call.api.find("Reg") == 0 || call.api == "ReadFile" || call.api == "WriteFile" || remoteProcess ||
                    call.api == "CloseHandle" || call.api == "CreateFileA" || call.api == "CreateFileW";
     auto &counted = m_lifecycleCalls[s2e()->getCurrentInstanceIndex()];
     if (tracked && call.recordEffect && !call.diagnostic && counted < 8192) {

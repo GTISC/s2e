@@ -56,6 +56,7 @@ struct ObservedWindowsCall {
     uint32_t requested = 0;
     uint32_t callId = 0, socket = 0, flags = 0, addressLength = 0;
     uint32_t listenerSocket = 0, acceptedSocket = 0, backlog = 0;
+    uint32_t targetPid = 0;
     std::vector<std::pair<uint64_t, klee::ref<klee::Expr>>> conversionInput;
     std::vector<klee::ref<klee::Expr>> conversionOutput;
     std::string conversionSeed;
