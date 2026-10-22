@@ -44,7 +44,7 @@ struct ObservedWindowsCall {
     std::string api, path, value, data, module, threadStartModule, threadStartSymbol;
     std::string originalSockaddr, effectiveSockaddr, peerSockaddr, bufferPrefix;
     uint64_t pid = 0, lifetime = 0, depth = 0;
-    uint32_t args[12] = {};
+    uint32_t args[16] = {};
     bool diagnostic = false;
     bool recordEffect = false;
     bool network = false;

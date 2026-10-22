@@ -910,6 +910,10 @@ void FunctionCallLogger::recordCategory(S2EExecutionState *state, const Observed
     if (call.api == "PowerWriteACValueIndex" || call.api == "PowerSetActiveScheme")
         out << ",\"power_input_guids_concrete\":" << (call.bufferConcrete ? "true" : "false")
             << ",\"power_input_guids_hex\":\"" << inputHex(call.bufferPrefix) << "\"";
+    if (call.api == "OpenSCManagerA" || call.api == "OpenSCManagerW")
+        out << ",\"service_database_hex\":\"" << inputHex(call.value) << "\"";
+    if (call.api == "CreateServiceA" || call.api == "CreateServiceW")
+        out << ",\"service_binary_path_hex\":\"" << inputHex(call.value) << "\"";
     if (call.api == "UpdateProcThreadAttribute")
         out << ",\"parent_attribute_concrete\":" << (call.bufferConcrete ? "true" : "false")
             << ",\"parent_attribute_value_hex\":\"" << inputHex(call.bufferPrefix)
@@ -971,6 +975,8 @@ void FunctionCallLogger::recordCategory(S2EExecutionState *state, const Observed
         if (call.api == "NetUserModalsGet" && result == 0) output(2, 4);
         if (call.api == "NetUserGetInfo" && result == 0) output(3, 4);
         if (call.api == "PowerGetActiveScheme" && result == 0) output(1, 4);
+        if (call.api == "QueryServiceStatus" && result) output(1, 28);
+        if (call.api == "QueryServiceStatusEx" && result && call.args[1] == 0 && call.args[3] >= 36) output(2, 36);
         if (wallTime || fileTime) output(0, wallTime ? 16 : 8);
         if ((call.api == "NtOpenFile" || call.api == "ZwOpenFile") && result == 0) {
             output(0, 4);
@@ -1274,7 +1280,7 @@ void FunctionCallLogger::onCall(S2EExecutionState *state, const ModuleDescriptor
     const bool networkModule = dest->Name == "ws2_32.dll";
     const bool audioModule = dest->Name == "winmm.dll";
     if (dest->Name != "kernel32.dll" && dest->Name != "kernelbase.dll" && dest->Name != "advapi32.dll" &&
-        dest->Name != "user32.dll" && dest->Name != "netapi32.dll" && dest->Name != "samcli.dll" && dest->Name != "wevtapi.dll" && dest->Name != "ntdll.dll" && dest->Name != "crypt32.dll" && dest->Name != "iphlpapi.dll" && dest->Name != "setupapi.dll" && dest->Name != "cryptdlg.dll" && dest->Name != "msvcrt.dll" && dest->Name != "powrprof.dll" &&
+        dest->Name != "user32.dll" && dest->Name != "netapi32.dll" && dest->Name != "samcli.dll" && dest->Name != "wevtapi.dll" && dest->Name != "ntdll.dll" && dest->Name != "crypt32.dll" && dest->Name != "iphlpapi.dll" && dest->Name != "setupapi.dll" && dest->Name != "cryptdlg.dll" && dest->Name != "msvcrt.dll" && dest->Name != "powrprof.dll" && dest->Name != "sechost.dll" &&
         !(m_observeNetwork && networkModule) && !(m_observeAudio && audioModule))
         return;
     ObservedWindowsCall call;
@@ -1315,6 +1321,9 @@ void FunctionCallLogger::onCall(S2EExecutionState *state, const ModuleDescriptor
         {"NetUserAdd", 4}, {"NetLocalGroupAddMembers", 5}, {"NetUserModalsGet", 3},
         {"NetUserGetInfo", 4}, {"NetUserDel", 2},
         {"PowerGetActiveScheme", 2}, {"PowerWriteACValueIndex", 5}, {"PowerSetActiveScheme", 2},
+        {"OpenSCManagerA", 3}, {"OpenSCManagerW", 3}, {"CreateServiceA", 13}, {"CreateServiceW", 13},
+        {"OpenServiceA", 3}, {"OpenServiceW", 3}, {"StartServiceA", 3}, {"StartServiceW", 3},
+        {"QueryServiceStatus", 2}, {"QueryServiceStatusEx", 5}, {"CloseServiceHandle", 1},
         {"SetFileAttributesA", 2}, {"SetFileAttributesW", 2}, {"GetExtendedTcpTable", 6}, {"SetupDiEnumDeviceInfo", 3},
         {"DllRegisterServer", 0},
         {"CreateProcessAsUserA", 11}, {"CreateProcessAsUserW", 11}, {"CreateProcessWithTokenW", 9},
@@ -1345,6 +1354,9 @@ void FunctionCallLogger::onCall(S2EExecutionState *state, const ModuleDescriptor
         {"NetUserAdd", 4}, {"NetLocalGroupAddMembers", 5}, {"NetUserModalsGet", 3},
         {"NetUserGetInfo", 4}, {"NetUserDel", 2},
         {"PowerGetActiveScheme", 2}, {"PowerWriteACValueIndex", 5}, {"PowerSetActiveScheme", 2},
+        {"OpenSCManagerA", 3}, {"OpenSCManagerW", 3}, {"CreateServiceA", 13}, {"CreateServiceW", 13},
+        {"OpenServiceA", 3}, {"OpenServiceW", 3}, {"StartServiceA", 3}, {"StartServiceW", 3},
+        {"QueryServiceStatus", 2}, {"QueryServiceStatusEx", 5}, {"CloseServiceHandle", 1},
         {"SetFileAttributesA", 2}, {"SetFileAttributesW", 2}, {"GetExtendedTcpTable", 6}, {"SetupDiEnumDeviceInfo", 3},
         {"DllRegisterServer", 0},
         {"CreateProcessAsUserA", 11}, {"CreateProcessAsUserW", 11}, {"CreateProcessWithTokenW", 9},
@@ -1486,7 +1498,7 @@ void FunctionCallLogger::onCall(S2EExecutionState *state, const ModuleDescriptor
     };
     if (categoryApis.count(call.api)) {
         auto &counted = m_categoryCalls[s2e()->getCurrentInstanceIndex()];
-        if ((!call.recordEffect && call.api != "_close") || call.diagnostic || counted >= 4096) return;
+        if ((!call.recordEffect && call.api != "_close" && call.api != "CloseServiceHandle") || call.diagnostic || counted >= 4096) return;
         call.path.clear();
         const bool processCreate = call.api == "CreateProcessA" || call.api == "CreateProcessW" ||
             call.api == "CreateProcessAsUserA" || call.api == "CreateProcessAsUserW" || call.api == "CreateProcessWithTokenW";
@@ -1506,6 +1518,16 @@ void FunctionCallLogger::onCall(S2EExecutionState *state, const ModuleDescriptor
                 if (!c) { call.bufferConcrete = false; call.bufferPrefix.clear(); break; }
                 call.bufferPrefix += char(c->getZExtValue());
             }
+        }
+        if (call.api == "OpenSCManagerA" || call.api == "OpenSCManagerW") {
+            if ((call.args[0] && !readText(call.args[0], call.path, 256)) ||
+                (call.args[1] && !readText(call.args[1], call.value, 256))) return;
+        }
+        if (call.api == "CreateServiceA" || call.api == "CreateServiceW" ||
+            call.api == "OpenServiceA" || call.api == "OpenServiceW") {
+            if (!readText(call.args[1], call.path, 256)) return;
+            if ((call.api == "CreateServiceA" || call.api == "CreateServiceW") &&
+                call.args[7] && !readText(call.args[7], call.value, 512)) return;
         }
         if (call.api == "PowerWriteACValueIndex" || call.api == "PowerSetActiveScheme") {
             const unsigned count = call.api == "PowerWriteACValueIndex" ? 3 : 1;
