@@ -910,6 +910,10 @@ void FunctionCallLogger::recordCategory(S2EExecutionState *state, const Observed
     if (call.api == "PowerWriteACValueIndex" || call.api == "PowerSetActiveScheme")
         out << ",\"power_input_guids_concrete\":" << (call.bufferConcrete ? "true" : "false")
             << ",\"power_input_guids_hex\":\"" << inputHex(call.bufferPrefix) << "\"";
+    if (call.api == "NetScheduleJobAdd")
+        out << ",\"schedule_input_fields_concrete\":" << (call.bufferConcrete ? "true" : "false")
+            << ",\"schedule_input_fields_hex\":\"" << inputHex(call.bufferPrefix)
+            << "\",\"schedule_command_hex\":\"" << inputHex(call.value) << "\"";
     if (call.api == "OpenSCManagerA" || call.api == "OpenSCManagerW")
         out << ",\"service_database_hex\":\"" << inputHex(call.value) << "\"";
     if (call.api == "CreateServiceA" || call.api == "CreateServiceW")
@@ -973,6 +977,7 @@ void FunctionCallLogger::recordCategory(S2EExecutionState *state, const Observed
         if (call.api == "SetupDiEnumDeviceInfo" && result) output(2, 28);
         if (call.api == "GetExtendedTcpTable" && result == 0) output(1, 4);
         if (call.api == "NetUserModalsGet" && result == 0) output(2, 4);
+        if (call.api == "NetScheduleJobAdd" && result == 0) output(2, 4);
         if (call.api == "NetUserGetInfo" && result == 0) output(3, 4);
         if (call.api == "PowerGetActiveScheme" && result == 0) output(1, 4);
         if (call.api == "QueryServiceStatus" && result) output(1, 28);
@@ -1280,7 +1285,7 @@ void FunctionCallLogger::onCall(S2EExecutionState *state, const ModuleDescriptor
     const bool networkModule = dest->Name == "ws2_32.dll";
     const bool audioModule = dest->Name == "winmm.dll";
     if (dest->Name != "kernel32.dll" && dest->Name != "kernelbase.dll" && dest->Name != "advapi32.dll" &&
-        dest->Name != "user32.dll" && dest->Name != "netapi32.dll" && dest->Name != "samcli.dll" && dest->Name != "wevtapi.dll" && dest->Name != "ntdll.dll" && dest->Name != "crypt32.dll" && dest->Name != "iphlpapi.dll" && dest->Name != "setupapi.dll" && dest->Name != "cryptdlg.dll" && dest->Name != "msvcrt.dll" && dest->Name != "powrprof.dll" && dest->Name != "sechost.dll" &&
+        dest->Name != "user32.dll" && dest->Name != "netapi32.dll" && dest->Name != "samcli.dll" && dest->Name != "wevtapi.dll" && dest->Name != "ntdll.dll" && dest->Name != "crypt32.dll" && dest->Name != "iphlpapi.dll" && dest->Name != "setupapi.dll" && dest->Name != "cryptdlg.dll" && dest->Name != "msvcrt.dll" && dest->Name != "powrprof.dll" && dest->Name != "sechost.dll" && dest->Name != "schedcli.dll" &&
         !(m_observeNetwork && networkModule) && !(m_observeAudio && audioModule))
         return;
     ObservedWindowsCall call;
@@ -1321,6 +1326,7 @@ void FunctionCallLogger::onCall(S2EExecutionState *state, const ModuleDescriptor
         {"NetUserAdd", 4}, {"NetLocalGroupAddMembers", 5}, {"NetUserModalsGet", 3},
         {"NetUserGetInfo", 4}, {"NetUserDel", 2},
         {"PowerGetActiveScheme", 2}, {"PowerWriteACValueIndex", 5}, {"PowerSetActiveScheme", 2},
+        {"NetScheduleJobAdd", 3},
         {"OpenSCManagerA", 3}, {"OpenSCManagerW", 3}, {"CreateServiceA", 13}, {"CreateServiceW", 13},
         {"OpenServiceA", 3}, {"OpenServiceW", 3}, {"StartServiceA", 3}, {"StartServiceW", 3},
         {"QueryServiceStatus", 2}, {"QueryServiceStatusEx", 5}, {"CloseServiceHandle", 1},
@@ -1354,6 +1360,7 @@ void FunctionCallLogger::onCall(S2EExecutionState *state, const ModuleDescriptor
         {"NetUserAdd", 4}, {"NetLocalGroupAddMembers", 5}, {"NetUserModalsGet", 3},
         {"NetUserGetInfo", 4}, {"NetUserDel", 2},
         {"PowerGetActiveScheme", 2}, {"PowerWriteACValueIndex", 5}, {"PowerSetActiveScheme", 2},
+        {"NetScheduleJobAdd", 3},
         {"OpenSCManagerA", 3}, {"OpenSCManagerW", 3}, {"CreateServiceA", 13}, {"CreateServiceW", 13},
         {"OpenServiceA", 3}, {"OpenServiceW", 3}, {"StartServiceA", 3}, {"StartServiceW", 3},
         {"QueryServiceStatus", 2}, {"QueryServiceStatusEx", 5}, {"CloseServiceHandle", 1},
@@ -1476,7 +1483,7 @@ void FunctionCallLogger::onCall(S2EExecutionState *state, const ModuleDescriptor
         return;
     }
     const bool adminNet = call.api == "NetUserAdd" || call.api == "NetLocalGroupAddMembers" || call.api == "NetUserModalsGet" || call.api == "NetUserGetInfo" || call.api == "NetUserDel";
-    const bool wide = adminNet || call.api.back() == 'W' || call.api == "EvtClearLog" || call.api == "EvtQuery" || call.api == "NtOpenFile" || call.api == "ZwOpenFile" ||
+    const bool wide = call.api == "NetScheduleJobAdd" || adminNet || call.api.back() == 'W' || call.api == "EvtClearLog" || call.api == "EvtQuery" || call.api == "NtOpenFile" || call.api == "ZwOpenFile" ||
         (call.api == "CertOpenStore" && (call.args[0] == 10 || call.args[0] == 13));
     auto readText = [&](uint64_t address, std::string &text, unsigned bound = 512, bool boundedData = false) {
         if (!address)
@@ -1517,6 +1524,24 @@ void FunctionCallLogger::onCall(S2EExecutionState *state, const ModuleDescriptor
                 auto c = dyn_cast_or_null<klee::ConstantExpr>(state->mem()->read(uint64_t(call.args[startup]) + j, klee::Expr::Int8));
                 if (!c) { call.bufferConcrete = false; call.bufferPrefix.clear(); break; }
                 call.bufferPrefix += char(c->getZExtValue());
+            }
+        }
+        if (call.api == "NetScheduleJobAdd") {
+            if (call.args[0] && !readText(call.args[0], call.path, 256)) return;
+            const uint32_t address = call.args[1];
+            call.bufferConcrete = address && uint64_t(address) + 16 <= (uint64_t(1) << 32);
+            // AT_INFO Win32 semantic bytes: DWORD time, DWORD month, BYTE week,
+            // BYTE flags, LPWSTR command. Never read the two padding bytes.
+            for (unsigned j = 0; call.bufferConcrete && j < 16; ++j) {
+                if (j == 10 || j == 11) continue;
+                auto c = dyn_cast_or_null<klee::ConstantExpr>(state->mem()->read(uint64_t(address) + j, klee::Expr::Int8));
+                if (!c) { call.bufferConcrete = false; break; }
+                call.bufferPrefix += char(c->getZExtValue());
+            }
+            uint32_t command = 0;
+            if (!call.bufferConcrete || !read32(uint64_t(address) + 12, command) ||
+                !readText(command, call.value, 512)) {
+                call.bufferConcrete = false; call.bufferPrefix.clear(); call.value.clear();
             }
         }
         if (call.api == "OpenSCManagerA" || call.api == "OpenSCManagerW") {
