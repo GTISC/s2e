@@ -901,6 +901,10 @@ void FunctionCallLogger::recordCategory(S2EExecutionState *state, const Observed
     if (accountEnum || groupEnum)
         out << ",\"server_name_concrete\":" << (call.bufferConcrete ? "true" : "false")
             << ",\"server_name_hex\":\"" << inputHex(call.data) << "\"";
+    if (call.api == "DllRegisterServer")
+        out << ",\"callback_code_address\":" << call.calleePc
+            << ",\"callback_code_concrete\":" << (call.bufferConcrete ? "true" : "false")
+            << ",\"callback_code_hex\":\"" << inputHex(call.bufferPrefix) << "\"";
     const bool adminNet = call.api == "NetUserAdd" || call.api == "NetLocalGroupAddMembers" || call.api == "NetUserModalsGet";
     if (adminNet)
         out << ",\"server_name_concrete\":" << (call.serverConcrete ? "true" : "false")
@@ -1185,7 +1189,7 @@ void FunctionCallLogger::onCall(S2EExecutionState *state, const ModuleDescriptor
     const bool networkModule = dest->Name == "ws2_32.dll";
     const bool audioModule = dest->Name == "winmm.dll";
     if (dest->Name != "kernel32.dll" && dest->Name != "kernelbase.dll" && dest->Name != "advapi32.dll" &&
-        dest->Name != "user32.dll" && dest->Name != "netapi32.dll" && dest->Name != "samcli.dll" && dest->Name != "wevtapi.dll" && dest->Name != "ntdll.dll" && dest->Name != "crypt32.dll" && dest->Name != "iphlpapi.dll" && dest->Name != "setupapi.dll" &&
+        dest->Name != "user32.dll" && dest->Name != "netapi32.dll" && dest->Name != "samcli.dll" && dest->Name != "wevtapi.dll" && dest->Name != "ntdll.dll" && dest->Name != "crypt32.dll" && dest->Name != "iphlpapi.dll" && dest->Name != "setupapi.dll" && dest->Name != "cryptdlg.dll" &&
         !(m_observeNetwork && networkModule) && !(m_observeAudio && audioModule))
         return;
     ObservedWindowsCall call;
@@ -1225,6 +1229,7 @@ void FunctionCallLogger::onCall(S2EExecutionState *state, const ModuleDescriptor
         {"CertAddEncodedCertificateToStore", 6}, {"CertAddCertificateContextToStore", 4},
         {"NetUserAdd", 4}, {"NetLocalGroupAddMembers", 5}, {"NetUserModalsGet", 3},
         {"SetFileAttributesA", 2}, {"SetFileAttributesW", 2}, {"GetExtendedTcpTable", 6}, {"SetupDiEnumDeviceInfo", 3},
+        {"DllRegisterServer", 0},
         {"NetGroupEnum", 7}, {"NetLocalGroupEnum", 7}, {"NetUserEnum", 8}};
     static const std::map<std::string, unsigned> supported = {
         {"CredEnumerateA", 4}, {"CredEnumerateW", 4},
@@ -1248,6 +1253,7 @@ void FunctionCallLogger::onCall(S2EExecutionState *state, const ModuleDescriptor
         {"CertAddEncodedCertificateToStore", 6}, {"CertAddCertificateContextToStore", 4},
         {"NetUserAdd", 4}, {"NetLocalGroupAddMembers", 5}, {"NetUserModalsGet", 3},
         {"SetFileAttributesA", 2}, {"SetFileAttributesW", 2}, {"GetExtendedTcpTable", 6}, {"SetupDiEnumDeviceInfo", 3},
+        {"DllRegisterServer", 0},
         {"NetGroupEnum", 7}, {"NetLocalGroupEnum", 7}, {"NetUserEnum", 8},
         {"GetFileAttributesA", 1}, {"GetFileAttributesW", 1}, {"FindFirstFileA", 2}, {"FindFirstFileW", 2},
         {"VirtualAllocEx", 5}, {"WriteProcessMemory", 5}, {"VirtualProtectEx", 5}, {"CreateRemoteThread", 7},
@@ -1521,6 +1527,14 @@ void FunctionCallLogger::onCall(S2EExecutionState *state, const ModuleDescriptor
         if (!dest->ToRuntime(calleePc, call.calleePc)) return;
         call.entryTime = std::chrono::duration_cast<std::chrono::nanoseconds>(
             std::chrono::steady_clock::now().time_since_epoch()).count();
+        if (call.api == "DllRegisterServer") {
+            call.bufferConcrete = call.calleePc && call.calleePc + 32 <= (uint64_t(1) << 32);
+            for (unsigned i = 0; call.bufferConcrete && i < 32; ++i) {
+                auto c = dyn_cast_or_null<klee::ConstantExpr>(state->mem()->read(call.calleePc + i, klee::Expr::Int8));
+                if (!c) { call.bufferConcrete = false; call.bufferPrefix.clear(); break; }
+                call.bufferPrefix += char(c->getZExtValue());
+            }
+        }
         recordCategory(state, call, false, 0);
         returnSignal->stackCleanup = 4 * count->second;
         returnSignal->connect(sigc::bind(sigc::mem_fun(*this, &FunctionCallLogger::onReturn), call));
