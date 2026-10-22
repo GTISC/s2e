@@ -867,7 +867,61 @@ void FunctionCallLogger::recordAudioEvent(S2EExecutionState *state, const Observ
     if (!out) s2e()->getExecutor()->terminateState(*state, "Audio journal write failed");
 }
 
-// Passive, bounded lifecycle evidence. Never reads data buffers or chooses symbolic values.
+// Passive category observations preserve void-return semantics and bounded concrete outputs.
+void FunctionCallLogger::recordCategory(S2EExecutionState *state, const ObservedWindowsCall &call,
+                                       bool returned, uint32_t result) {
+    auto now = std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+    const bool wallTime = call.api == "GetSystemTime" || call.api == "GetLocalTime";
+    const bool fileTime = call.api == "GetSystemTimeAsFileTime" || call.api == "GetSystemTimePreciseAsFileTime";
+    const bool voidResult = wallTime || fileTime || call.api == "keybd_event" || call.api == "mouse_event";
+    std::ofstream out(s2e()->getOutputFilename("category-observations.jsonl"), std::ios::app);
+    out << "{\"schema\":1,\"instance\":" << s2e()->getCurrentInstanceIndex()
+        << ",\"state\":" << state->getID() << ",\"pid\":" << call.pid
+        << ",\"lifetime\":" << call.lifetime << ",\"depth\":" << call.depth
+        << ",\"diagnostic_lineage\":false,\"call_id\":" << call.callId
+        << ",\"time_ns\":" << (returned ? now : call.entryTime) << ",\"entry_time_ns\":" << call.entryTime
+        << ",\"event\":\"" << (returned ? "return" : "enter") << "\",\"api\":\"" << call.api
+        << "\",\"module_hex\":\"" << inputHex(call.module) << "\",\"caller_pc\":" << call.callerPc
+        << ",\"callee_pc\":" << call.calleePc << ",\"path_hex\":\"" << inputHex(call.path)
+        << "\",\"return_semantics\":\"" << (voidResult ? "void" : "value") << "\",\"args\":[";
+    for (unsigned i = 0; i < call.argumentCount; ++i) {
+        if (i) out << ',';
+        out << call.args[i];
+    }
+    out << ']';
+    if (returned) {
+        if (!voidResult) out << ",\"result\":" << result;
+        out << ",\"outputs\":[";
+        bool first = true;
+        auto output = [&](unsigned index, unsigned size) {
+            std::string bytes;
+            bool concrete = call.args[index] && uint64_t(call.args[index]) + size <= (uint64_t(1) << 32);
+            for (unsigned i = 0; concrete && i < size; ++i) {
+                auto c = dyn_cast_or_null<klee::ConstantExpr>(
+                    state->mem()->read(uint64_t(call.args[index]) + i, klee::Expr::Int8));
+                if (!c) { concrete = false; bytes.clear(); break; }
+                bytes += char(c->getZExtValue());
+            }
+            if (!first) out << ',';
+            first = false;
+            out << "{\"arg_index\":" << index << ",\"address\":" << call.args[index]
+                << ",\"size\":" << size << ",\"concrete\":" << (concrete ? "true" : "false")
+                << ",\"hex\":\"" << inputHex(bytes) << "\"}";
+        };
+        if (wallTime || fileTime) output(0, wallTime ? 16 : 8);
+        if (call.api.find("GetDiskFreeSpaceEx") == 0 && result)
+            for (unsigned i = 1; i <= 3; ++i) output(i, 8);
+        if (call.api.find("GetVolumeInformation") == 0 && result)
+            for (unsigned i = 3; i <= 5; ++i) output(i, 4);
+        out << ']';
+    }
+    out << "}\n";
+    out.close();
+    if (!out) s2e()->getExecutor()->terminateState(*state, "Category observation journal write failed");
+}
+
+// Passive, bounded lifecycle evidence. Never chooses symbolic values.
 void FunctionCallLogger::recordLifecycle(S2EExecutionState *state, const ObservedWindowsCall &call,
                                          bool returned, uint32_t result) {
     if (!call.lifecycle) return;
@@ -991,6 +1045,7 @@ void FunctionCallLogger::onCall(S2EExecutionState *state, const ModuleDescriptor
     const bool networkModule = dest->Name == "ws2_32.dll";
     const bool audioModule = dest->Name == "winmm.dll";
     if (dest->Name != "kernel32.dll" && dest->Name != "kernelbase.dll" && dest->Name != "advapi32.dll" &&
+        dest->Name != "user32.dll" &&
         !(m_observeNetwork && networkModule) && !(m_observeAudio && audioModule))
         return;
     ObservedWindowsCall call;
@@ -1017,6 +1072,12 @@ void FunctionCallLogger::onCall(S2EExecutionState *state, const ModuleDescriptor
     if (name == exports->second.end())
         return;
     call.api = name->second;
+    static const std::map<std::string, unsigned> categoryApis = {
+        {"GetSystemTime", 1}, {"GetLocalTime", 1}, {"GetSystemTimeAsFileTime", 1},
+        {"GetSystemTimePreciseAsFileTime", 1}, {"GetDriveTypeA", 1}, {"GetDriveTypeW", 1},
+        {"GetLogicalDrives", 0}, {"GetDiskFreeSpaceExA", 4}, {"GetDiskFreeSpaceExW", 4},
+        {"GetVolumeInformationA", 8}, {"GetVolumeInformationW", 8},
+        {"keybd_event", 4}, {"mouse_event", 5}, {"SendInput", 3}};
     static const std::map<std::string, unsigned> supported = {
         {"CredEnumerateA", 4}, {"CredEnumerateW", 4},
         {"CreateFileA", 7},   {"CreateFileW", 7},     {"CopyFileA", 3},       {"CopyFileW", 3},
@@ -1026,6 +1087,11 @@ void FunctionCallLogger::onCall(S2EExecutionState *state, const ModuleDescriptor
         {"GetEnvironmentVariableA", 3}, {"GetEnvironmentVariableW", 3}, {"WideCharToMultiByte", 8},
         {"GetCommandLineA", 0}, {"GetCommandLineW", 0},
         {"GetProcAddress", 2},
+        {"GetSystemTime", 1}, {"GetLocalTime", 1}, {"GetSystemTimeAsFileTime", 1},
+        {"GetSystemTimePreciseAsFileTime", 1}, {"GetDriveTypeA", 1}, {"GetDriveTypeW", 1},
+        {"GetLogicalDrives", 0}, {"GetDiskFreeSpaceExA", 4}, {"GetDiskFreeSpaceExW", 4},
+        {"GetVolumeInformationA", 8}, {"GetVolumeInformationW", 8},
+        {"keybd_event", 4}, {"mouse_event", 5}, {"SendInput", 3},
         {"GetFileAttributesA", 1}, {"GetFileAttributesW", 1}, {"FindFirstFileA", 2}, {"FindFirstFileW", 2},
         {"VirtualAllocEx", 5}, {"WriteProcessMemory", 5}, {"VirtualProtectEx", 5}, {"CreateRemoteThread", 7},
         {"socket", 3}, {"connect", 3}, {"bind", 3}, {"listen", 2}, {"accept", 3},
@@ -1154,6 +1220,25 @@ void FunctionCallLogger::onCall(S2EExecutionState *state, const ModuleDescriptor
         }
         return boundedData;
     };
+    if (categoryApis.count(call.api)) {
+        auto &counted = m_categoryCalls[s2e()->getCurrentInstanceIndex()];
+        if (!call.recordEffect || call.diagnostic || counted >= 4096) return;
+        call.path.clear();
+        if ((call.api.find("GetDriveType") == 0 || call.api.find("GetDiskFreeSpaceEx") == 0 ||
+             call.api.find("GetVolumeInformation") == 0) && call.args[0] &&
+            !readText(call.args[0], call.path)) return;
+        call.category = true;
+        call.argumentCount = count->second;
+        call.callId = ++counted;
+        call.module = dest->Name;
+        if (!dest->ToRuntime(calleePc, call.calleePc)) return;
+        call.entryTime = std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
+        recordCategory(state, call, false, 0);
+        returnSignal->stackCleanup = 4 * count->second;
+        returnSignal->connect(sigc::bind(sigc::mem_fun(*this, &FunctionCallLogger::onReturn), call));
+        return;
+    }
     DECLARE_PLUGINSTATE(FunctionCallLoggerState, state);
     auto handle = std::make_tuple(call.pid, call.lifetime, call.args[0]);
     auto &handles = call.api.find("Reg") == 0 ? plgState->registryHandles : plgState->fileHandles;
@@ -1238,6 +1323,15 @@ void FunctionCallLogger::onReturn(S2EExecutionState *state, const ModuleDescript
     if (!m_regions->getProcessContext(state, pid, lifetime, depth, diagnostic) || pid != call.pid ||
         lifetime != call.lifetime)
         return;
+    if (call.category) {
+        uint32_t categoryResult = 0;
+        const bool voidResult = call.api == "GetSystemTime" || call.api == "GetLocalTime" ||
+            call.api == "GetSystemTimeAsFileTime" || call.api == "GetSystemTimePreciseAsFileTime" ||
+            call.api == "keybd_event" || call.api == "mouse_event";
+        if (!voidResult && !state->regs()->read(CPU_OFFSET(regs[R_EAX]), &categoryResult, 4, false)) return;
+        if (!diagnostic) recordCategory(state, call, true, categoryResult);
+        return;
+    }
     uint32_t result;
     if (!state->regs()->read(CPU_OFFSET(regs[R_EAX]), &result, sizeof(result), false))
         return;

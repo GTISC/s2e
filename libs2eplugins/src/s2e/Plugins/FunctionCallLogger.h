@@ -53,6 +53,8 @@ struct ObservedWindowsCall {
     bool bufferConcrete = false;
     uint64_t callerPc = 0, calleePc = 0, entryTime = 0;
     bool lifecycle = false;
+    bool category = false;
+    unsigned argumentCount = 0;
     uint32_t requested = 0;
     uint32_t callId = 0, socket = 0, flags = 0, addressLength = 0;
     uint32_t listenerSocket = 0, acceptedSocket = 0, backlog = 0;
@@ -101,6 +103,8 @@ private:
     unsigned m_audioCalls = 0;
     unsigned m_largeReads = 0;
     std::map<unsigned, unsigned> m_lifecycleCalls;
+    std::map<unsigned, unsigned> m_categoryCalls;
+    void recordCategory(S2EExecutionState *state, const ObservedWindowsCall &call, bool returned, uint32_t result);
     void recordLifecycle(S2EExecutionState *state, const ObservedWindowsCall &call, bool returned, uint32_t result);
     void observeLargeRead(S2EExecutionState *state, const ObservedWindowsCall &call, uint32_t result,
                           uint32_t count);
