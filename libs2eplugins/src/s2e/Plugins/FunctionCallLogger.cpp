@@ -921,7 +921,7 @@ void FunctionCallLogger::recordCategory(S2EExecutionState *state, const Observed
             << ",\"callback_code_address\":" << call.calleePc
             << ",\"callback_code_concrete\":" << (call.bufferConcrete ? "true" : "false")
             << ",\"callback_code_hex\":\"" << inputHex(call.bufferPrefix) << "\"";
-    const bool adminNet = call.api == "NetUserAdd" || call.api == "NetLocalGroupAddMembers" || call.api == "NetUserModalsGet";
+    const bool adminNet = call.api == "NetUserAdd" || call.api == "NetLocalGroupAddMembers" || call.api == "NetUserModalsGet" || call.api == "NetUserGetInfo" || call.api == "NetUserDel";
     if (adminNet)
         out << ",\"server_name_concrete\":" << (call.serverConcrete ? "true" : "false")
             << ",\"server_name_hex\":\"" << inputHex(call.data) << "\"";
@@ -966,6 +966,7 @@ void FunctionCallLogger::recordCategory(S2EExecutionState *state, const Observed
         if (call.api == "SetupDiEnumDeviceInfo" && result) output(2, 28);
         if (call.api == "GetExtendedTcpTable" && result == 0) output(1, 4);
         if (call.api == "NetUserModalsGet" && result == 0) output(2, 4);
+        if (call.api == "NetUserGetInfo" && result == 0) output(3, 4);
         if (wallTime || fileTime) output(0, wallTime ? 16 : 8);
         if ((call.api == "NtOpenFile" || call.api == "ZwOpenFile") && result == 0) {
             output(0, 4);
@@ -1010,7 +1011,7 @@ void FunctionCallLogger::recordCategory(S2EExecutionState *state, const Observed
                 << ",\"created_process_handle_pid\":" << handlePid;
         }
 
-        if (call.api == "NetUserModalsGet" || call.api == "GetExtendedTcpTable") {
+        if (call.api == "NetUserModalsGet" || call.api == "GetExtendedTcpTable" || call.api == "NetUserGetInfo") {
             uint32_t address = 0, size = 0;
             auto readConcrete32 = [&](uint64_t p, uint32_t &v) {
                 if (!p || p + 4 > (uint64_t(1) << 32)) return false;
@@ -1018,7 +1019,10 @@ void FunctionCallLogger::recordCategory(S2EExecutionState *state, const Observed
                 if (!c) return false; v = c->getZExtValue(); return true;
             };
             bool concrete = result == 0;
-            if (call.api == "NetUserModalsGet") {
+            if (call.api == "NetUserGetInfo") {
+                concrete = concrete && call.args[2] == 3 && readConcrete32(call.args[3], address);
+                size = concrete ? 28 : 0;
+            } else if (call.api == "NetUserModalsGet") {
                 concrete = concrete && call.args[1] == 0 && readConcrete32(call.args[2], address);
                 size = concrete ? 20 : 0;
             } else {
@@ -1036,6 +1040,24 @@ void FunctionCallLogger::recordCategory(S2EExecutionState *state, const Observed
             out << ",\"result_buffer_address\":" << address << ",\"result_buffer_bytes\":" << size
                 << ",\"result_buffer_concrete\":" << (concrete ? "true" : "false")
                 << ",\"result_buffer_hex\":\"" << inputHex(data) << "\"";
+            if (call.api == "NetUserGetInfo") {
+                uint32_t name = 0;
+                bool nameConcrete = concrete && readConcrete32(address, name) && name && uint64_t(name) + 256 <= (uint64_t(1) << 32);
+                std::string text;
+                bool terminated = false;
+                for (unsigned i = 0; nameConcrete && i < 128; ++i) {
+                    auto c = dyn_cast_or_null<klee::ConstantExpr>(state->mem()->read(uint64_t(name) + 2 * i, klee::Expr::Int16));
+                    if (!c || c->getZExtValue() > 127) { nameConcrete = false; break; }
+                    const uint16_t value = c->getZExtValue();
+                    text += char(value); text += char(value >> 8);
+                    if (!value) { terminated = true; break; }
+                }
+                nameConcrete = nameConcrete && terminated;
+                if (!nameConcrete) text.clear();
+                out << ",\"result_subject_name_address\":" << name
+                    << ",\"result_subject_name_concrete\":" << (nameConcrete ? "true" : "false")
+                    << ",\"result_subject_name_hex\":\"" << inputHex(text) << "\"";
+            }
         }
         if (enumerated) {
             auto read32 = [&](uint32_t address, uint32_t &value) {
@@ -1270,6 +1292,7 @@ void FunctionCallLogger::onCall(S2EExecutionState *state, const ModuleDescriptor
         {"CertAddStoreToCollection", 4}, {"CertCloseStore", 2},
         {"CertAddEncodedCertificateToStore", 6}, {"CertAddCertificateContextToStore", 4},
         {"NetUserAdd", 4}, {"NetLocalGroupAddMembers", 5}, {"NetUserModalsGet", 3},
+        {"NetUserGetInfo", 4}, {"NetUserDel", 2},
         {"SetFileAttributesA", 2}, {"SetFileAttributesW", 2}, {"GetExtendedTcpTable", 6}, {"SetupDiEnumDeviceInfo", 3},
         {"DllRegisterServer", 0},
         {"CreateProcessAsUserA", 11}, {"CreateProcessAsUserW", 11}, {"CreateProcessWithTokenW", 9},
@@ -1298,6 +1321,7 @@ void FunctionCallLogger::onCall(S2EExecutionState *state, const ModuleDescriptor
         {"CertAddStoreToCollection", 4}, {"CertCloseStore", 2},
         {"CertAddEncodedCertificateToStore", 6}, {"CertAddCertificateContextToStore", 4},
         {"NetUserAdd", 4}, {"NetLocalGroupAddMembers", 5}, {"NetUserModalsGet", 3},
+        {"NetUserGetInfo", 4}, {"NetUserDel", 2},
         {"SetFileAttributesA", 2}, {"SetFileAttributesW", 2}, {"GetExtendedTcpTable", 6}, {"SetupDiEnumDeviceInfo", 3},
         {"DllRegisterServer", 0},
         {"CreateProcessAsUserA", 11}, {"CreateProcessAsUserW", 11}, {"CreateProcessWithTokenW", 9},
@@ -1416,7 +1440,7 @@ void FunctionCallLogger::onCall(S2EExecutionState *state, const ModuleDescriptor
         returnSignal->connect(sigc::bind(sigc::mem_fun(*this, &FunctionCallLogger::onReturn), call));
         return;
     }
-    const bool adminNet = call.api == "NetUserAdd" || call.api == "NetLocalGroupAddMembers" || call.api == "NetUserModalsGet";
+    const bool adminNet = call.api == "NetUserAdd" || call.api == "NetLocalGroupAddMembers" || call.api == "NetUserModalsGet" || call.api == "NetUserGetInfo" || call.api == "NetUserDel";
     const bool wide = adminNet || call.api.back() == 'W' || call.api == "EvtClearLog" || call.api == "EvtQuery" || call.api == "NtOpenFile" || call.api == "ZwOpenFile" ||
         (call.api == "CertOpenStore" && (call.args[0] == 10 || call.args[0] == 13));
     auto readText = [&](uint64_t address, std::string &text, unsigned bound = 512, bool boundedData = false) {
@@ -1563,7 +1587,7 @@ void FunctionCallLogger::onCall(S2EExecutionState *state, const ModuleDescriptor
                 }
             }
             if (!call.serverConcrete) call.data.clear();
-            if (call.api != "NetUserModalsGet") {
+            if (call.api == "NetUserAdd" || call.api == "NetLocalGroupAddMembers") {
                 const bool user = call.api == "NetUserAdd";
                 const uint32_t address = call.args[user ? 2 : 3], size = user ? 28 : 4;
                 call.bufferConcrete = address && uint64_t(address) + size <= (uint64_t(1) << 32);
@@ -1578,6 +1602,9 @@ void FunctionCallLogger::onCall(S2EExecutionState *state, const ModuleDescriptor
                 if (!user && !readText(call.args[1], call.path, 256)) call.bufferConcrete = false;
                 if (!call.bufferConcrete) { call.bufferPrefix.clear(); call.value.clear(); call.requested = 0; }
             }
+        }
+        if (call.api == "NetUserGetInfo" || call.api == "NetUserDel") {
+            if (!readText(call.args[1], call.path, 256)) return;
         }
         if (call.api == "SetFileAttributesA" || call.api == "SetFileAttributesW") {
             if (!readText(call.args[0], call.path, 512)) return;
