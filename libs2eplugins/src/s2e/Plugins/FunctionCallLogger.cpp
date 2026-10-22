@@ -886,6 +886,7 @@ void FunctionCallLogger::recordLifecycle(S2EExecutionState *state, const Observe
         << ",\"input_capacity\":0";
     const bool io = call.api == "ReadFile" || call.api == "WriteFile";
     if (io || call.api == "CloseHandle") out << ",\"handle\":" << call.args[0];
+    if (call.api == "GetProcAddress") out << ",\"module_handle\":" << call.args[0];
     if (io) {
         out << ",\"overlapped\":" << (call.args[4] ? "true" : "false")
             << ",\"count_address\":" << call.args[3];
@@ -933,9 +934,11 @@ void FunctionCallLogger::recordLifecycle(S2EExecutionState *state, const Observe
             if (returned) {
                 auto count = call.args[4] ? dyn_cast_or_null<klee::ConstantExpr>(
                     state->mem()->read(call.args[4], klee::Expr::Int32)) : nullptr;
-                const bool valid = result && count && count->getZExtValue() <= call.args[3];
+                const bool inferred = result && !call.args[4];
+                const bool valid = inferred || (result && count && count->getZExtValue() <= call.args[3]);
                 out << ",\"bytes_written_concrete\":" << (valid ? "true" : "false")
-                    << ",\"bytes_written\":" << (valid ? count->getZExtValue() : 0);
+                    << ",\"bytes_written\":" << (valid ? (inferred ? call.args[3] : count->getZExtValue()) : 0)
+                    << ",\"bytes_written_inferred_from_success\":" << (inferred ? "true" : "false");
             }
         } else if (call.api == "VirtualProtectEx") {
             out << ",\"remote_base\":" << call.args[1] << ",\"region_size\":" << call.args[2]
@@ -1018,6 +1021,7 @@ void FunctionCallLogger::onCall(S2EExecutionState *state, const ModuleDescriptor
         {"RegSetValueExW", 6}, {"ReadFile", 5}, {"RegQueryValueExA", 6}, {"RegQueryValueExW", 6},
         {"GetEnvironmentVariableA", 3}, {"GetEnvironmentVariableW", 3}, {"WideCharToMultiByte", 8},
         {"GetCommandLineA", 0}, {"GetCommandLineW", 0},
+        {"GetProcAddress", 2},
         {"GetFileAttributesA", 1}, {"GetFileAttributesW", 1}, {"FindFirstFileA", 2}, {"FindFirstFileW", 2},
         {"VirtualAllocEx", 5}, {"WriteProcessMemory", 5}, {"VirtualProtectEx", 5}, {"CreateRemoteThread", 7},
         {"socket", 3}, {"connect", 3}, {"bind", 3}, {"listen", 2}, {"accept", 3},
@@ -1150,6 +1154,9 @@ void FunctionCallLogger::onCall(S2EExecutionState *state, const ModuleDescriptor
         if (!readText(call.args[0], call.path)) return;
     } else if (call.api.find("GetCommandLine") == 0) {
         call.path = "process_command_line";
+    } else if (call.api == "GetProcAddress") {
+        call.path.clear();
+        if (!readText(call.args[1], call.path, 128)) return;
     } else if (call.api.find("CopyFile") == 0) {
         call.path.clear();
         if (!readText(call.args[1], call.path))
@@ -1175,7 +1182,7 @@ void FunctionCallLogger::onCall(S2EExecutionState *state, const ModuleDescriptor
     }
     // Track only direct non-DLL calls in the causally monitored process tree.
     // File handles stay state/PID/lifetime local in the existing observer map.
-    bool tracked = call.api.find("CredEnumerate") == 0 || call.api.find("Reg") == 0 || call.api == "ReadFile" || call.api == "WriteFile" || remoteProcess ||
+    bool tracked = call.api.find("CredEnumerate") == 0 || call.api.find("Reg") == 0 || call.api == "ReadFile" || call.api == "WriteFile" || call.api == "GetProcAddress" || remoteProcess ||
                    call.api == "CloseHandle" || call.api == "CreateFileA" || call.api == "CreateFileW";
     auto &counted = m_lifecycleCalls[s2e()->getCurrentInstanceIndex()];
     if (tracked && call.recordEffect && !call.diagnostic && counted < 8192) {
