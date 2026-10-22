@@ -51,6 +51,7 @@ struct ObservedWindowsCall {
     bool audio = false;
     bool redirected = false;
     bool bufferConcrete = false;
+    bool serverConcrete = false;
     uint64_t callerPc = 0, calleePc = 0, entryTime = 0;
     bool lifecycle = false;
     bool category = false;

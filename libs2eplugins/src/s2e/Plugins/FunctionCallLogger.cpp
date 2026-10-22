@@ -898,6 +898,16 @@ void FunctionCallLogger::recordCategory(S2EExecutionState *state, const Observed
     if (accountEnum || groupEnum)
         out << ",\"server_name_concrete\":" << (call.bufferConcrete ? "true" : "false")
             << ",\"server_name_hex\":\"" << inputHex(call.data) << "\"";
+    const bool adminNet = call.api == "NetUserAdd" || call.api == "NetLocalGroupAddMembers" || call.api == "NetUserModalsGet";
+    if (adminNet)
+        out << ",\"server_name_concrete\":" << (call.serverConcrete ? "true" : "false")
+            << ",\"server_name_hex\":\"" << inputHex(call.data) << "\"";
+    if (call.api == "NetUserAdd" || call.api == "NetLocalGroupAddMembers")
+        out << ",\"admin_input_concrete\":" << (call.bufferConcrete ? "true" : "false")
+            << ",\"admin_input_hex\":\"" << inputHex(call.bufferPrefix)
+            << "\",\"subject_name_hex\":\"" << inputHex(call.value) << "\",\"input_subject_address\":" << call.requested;
+    if (call.api == "GetExtendedTcpTable" || call.api == "SetupDiEnumDeviceInfo")
+        out << ",\"input_capacity\":" << call.requested;
     if (call.api == "SendInput" || call.api == "SetSecurityInfo")
         out << ",\"input_buffer_concrete\":" << (call.bufferConcrete ? "true" : "false")
             << ",\"input_buffer_hex\":\"" << inputHex(call.bufferPrefix) << "\"";
@@ -928,6 +938,9 @@ void FunctionCallLogger::recordCategory(S2EExecutionState *state, const Observed
                 << ",\"size\":" << size << ",\"concrete\":" << (concrete ? "true" : "false")
                 << ",\"hex\":\"" << inputHex(bytes) << "\"}";
         };
+        if (call.api == "SetupDiEnumDeviceInfo" && result) output(2, 28);
+        if (call.api == "GetExtendedTcpTable" && result == 0) output(1, 4);
+        if (call.api == "NetUserModalsGet" && result == 0) output(2, 4);
         if (wallTime || fileTime) output(0, wallTime ? 16 : 8);
         if ((call.api == "NtOpenFile" || call.api == "ZwOpenFile") && result == 0) {
             output(0, 4);
@@ -947,7 +960,34 @@ void FunctionCallLogger::recordCategory(S2EExecutionState *state, const Observed
             output(accountEnum ? 5 : 4, 4);
             output(accountEnum ? 6 : 5, 4);
         }
-        out << ']';
+        out << "]";
+        if (call.api == "NetUserModalsGet" || call.api == "GetExtendedTcpTable") {
+            uint32_t address = 0, size = 0;
+            auto readConcrete32 = [&](uint64_t p, uint32_t &v) {
+                if (!p || p + 4 > (uint64_t(1) << 32)) return false;
+                auto c = dyn_cast_or_null<klee::ConstantExpr>(state->mem()->read(p, klee::Expr::Int32));
+                if (!c) return false; v = c->getZExtValue(); return true;
+            };
+            bool concrete = result == 0;
+            if (call.api == "NetUserModalsGet") {
+                concrete = concrete && call.args[1] == 0 && readConcrete32(call.args[2], address);
+                size = concrete ? 20 : 0;
+            } else {
+                address = call.args[0];
+                concrete = concrete && readConcrete32(call.args[1], size) && size <= call.requested;
+            }
+            concrete = concrete && address && size && size <= 4096 && uint64_t(address) + size <= (uint64_t(1) << 32);
+            std::string data;
+            for (uint32_t i = 0; concrete && i < size; ++i) {
+                auto c = dyn_cast_or_null<klee::ConstantExpr>(state->mem()->read(uint64_t(address) + i, klee::Expr::Int8));
+                if (!c) { concrete = false; break; }
+                data += char(c->getZExtValue());
+            }
+            if (!concrete) data.clear();
+            out << ",\"result_buffer_address\":" << address << ",\"result_buffer_bytes\":" << size
+                << ",\"result_buffer_concrete\":" << (concrete ? "true" : "false")
+                << ",\"result_buffer_hex\":\"" << inputHex(data) << "\"";
+        }
         if (enumerated) {
             auto read32 = [&](uint32_t address, uint32_t &value) {
                 if (!address || uint64_t(address) + 4 > (uint64_t(1) << 32)) return false;
@@ -1120,7 +1160,7 @@ void FunctionCallLogger::onCall(S2EExecutionState *state, const ModuleDescriptor
     const bool networkModule = dest->Name == "ws2_32.dll";
     const bool audioModule = dest->Name == "winmm.dll";
     if (dest->Name != "kernel32.dll" && dest->Name != "kernelbase.dll" && dest->Name != "advapi32.dll" &&
-        dest->Name != "user32.dll" && dest->Name != "netapi32.dll" && dest->Name != "samcli.dll" && dest->Name != "wevtapi.dll" && dest->Name != "ntdll.dll" && dest->Name != "crypt32.dll" &&
+        dest->Name != "user32.dll" && dest->Name != "netapi32.dll" && dest->Name != "samcli.dll" && dest->Name != "wevtapi.dll" && dest->Name != "ntdll.dll" && dest->Name != "crypt32.dll" && dest->Name != "iphlpapi.dll" && dest->Name != "setupapi.dll" &&
         !(m_observeNetwork && networkModule) && !(m_observeAudio && audioModule))
         return;
     ObservedWindowsCall call;
@@ -1158,6 +1198,8 @@ void FunctionCallLogger::onCall(S2EExecutionState *state, const ModuleDescriptor
         {"CertOpenStore", 5}, {"CertOpenSystemStoreA", 2}, {"CertOpenSystemStoreW", 2},
         {"CertAddStoreToCollection", 4}, {"CertCloseStore", 2},
         {"CertAddEncodedCertificateToStore", 6}, {"CertAddCertificateContextToStore", 4},
+        {"NetUserAdd", 4}, {"NetLocalGroupAddMembers", 5}, {"NetUserModalsGet", 3},
+        {"SetFileAttributesA", 2}, {"SetFileAttributesW", 2}, {"GetExtendedTcpTable", 6}, {"SetupDiEnumDeviceInfo", 3},
         {"NetGroupEnum", 7}, {"NetLocalGroupEnum", 7}, {"NetUserEnum", 8}};
     static const std::map<std::string, unsigned> supported = {
         {"CredEnumerateA", 4}, {"CredEnumerateW", 4},
@@ -1178,6 +1220,8 @@ void FunctionCallLogger::onCall(S2EExecutionState *state, const ModuleDescriptor
         {"CertOpenStore", 5}, {"CertOpenSystemStoreA", 2}, {"CertOpenSystemStoreW", 2},
         {"CertAddStoreToCollection", 4}, {"CertCloseStore", 2},
         {"CertAddEncodedCertificateToStore", 6}, {"CertAddCertificateContextToStore", 4},
+        {"NetUserAdd", 4}, {"NetLocalGroupAddMembers", 5}, {"NetUserModalsGet", 3},
+        {"SetFileAttributesA", 2}, {"SetFileAttributesW", 2}, {"GetExtendedTcpTable", 6}, {"SetupDiEnumDeviceInfo", 3},
         {"NetGroupEnum", 7}, {"NetLocalGroupEnum", 7}, {"NetUserEnum", 8},
         {"GetFileAttributesA", 1}, {"GetFileAttributesW", 1}, {"FindFirstFileA", 2}, {"FindFirstFileW", 2},
         {"VirtualAllocEx", 5}, {"WriteProcessMemory", 5}, {"VirtualProtectEx", 5}, {"CreateRemoteThread", 7},
@@ -1288,7 +1332,8 @@ void FunctionCallLogger::onCall(S2EExecutionState *state, const ModuleDescriptor
         returnSignal->connect(sigc::bind(sigc::mem_fun(*this, &FunctionCallLogger::onReturn), call));
         return;
     }
-    const bool wide = call.api.back() == 'W' || call.api == "EvtClearLog" || call.api == "EvtQuery" || call.api == "NtOpenFile" || call.api == "ZwOpenFile" ||
+    const bool adminNet = call.api == "NetUserAdd" || call.api == "NetLocalGroupAddMembers" || call.api == "NetUserModalsGet";
+    const bool wide = adminNet || call.api.back() == 'W' || call.api == "EvtClearLog" || call.api == "EvtQuery" || call.api == "NtOpenFile" || call.api == "ZwOpenFile" ||
         (call.api == "CertOpenStore" && (call.args[0] == 10 || call.args[0] == 13));
     auto readText = [&](uint64_t address, std::string &text, unsigned bound = 512, bool boundedData = false) {
         if (!address)
@@ -1382,6 +1427,43 @@ void FunctionCallLogger::onCall(S2EExecutionState *state, const ModuleDescriptor
             }
         }
 
+        if (adminNet) {
+            call.serverConcrete = !call.args[0];
+            if (call.args[0] && uint64_t(call.args[0]) + 256 <= (uint64_t(1) << 32)) {
+                for (unsigned i = 0; i < 128; ++i) {
+                    auto unit = dyn_cast_or_null<klee::ConstantExpr>(state->mem()->read(uint64_t(call.args[0]) + 2 * i, klee::Expr::Int16));
+                    if (!unit) break;
+                    const uint16_t value = unit->getZExtValue();
+                    call.data += char(value); call.data += char(value >> 8);
+                    if (!value) { call.serverConcrete = true; break; }
+                }
+            }
+            if (!call.serverConcrete) call.data.clear();
+            if (call.api != "NetUserModalsGet") {
+                const bool user = call.api == "NetUserAdd";
+                const uint32_t address = call.args[user ? 2 : 3], size = user ? 28 : 4;
+                call.bufferConcrete = address && uint64_t(address) + size <= (uint64_t(1) << 32);
+                for (uint32_t i = 0; call.bufferConcrete && i < size; ++i) {
+                    auto byte = dyn_cast_or_null<klee::ConstantExpr>(state->mem()->read(uint64_t(address) + i, klee::Expr::Int8));
+                    if (!byte) { call.bufferConcrete = false; break; }
+                    call.bufferPrefix += char(byte->getZExtValue());
+                }
+                call.bufferConcrete = call.bufferConcrete && read32(address, call.requested)
+                    && call.requested && uint64_t(call.requested) + 512 <= (uint64_t(1) << 32)
+                    && readText(call.requested, call.value, 256);
+                if (!user && !readText(call.args[1], call.path, 256)) call.bufferConcrete = false;
+                if (!call.bufferConcrete) { call.bufferPrefix.clear(); call.value.clear(); call.requested = 0; }
+            }
+        }
+        if (call.api == "SetFileAttributesA" || call.api == "SetFileAttributesW") {
+            if (!readText(call.args[0], call.path, 512)) return;
+        }
+        if (call.api == "GetExtendedTcpTable") {
+            if (!call.args[1] || !read32(call.args[1], call.requested)) return;
+        }
+        if (call.api == "SetupDiEnumDeviceInfo") {
+            if (!call.args[2] || !read32(call.args[2], call.requested) || call.requested != 28) return;
+        }
         if (call.api == "GetComputerNameA" || call.api == "GetComputerNameW") {
             if (!call.args[1] || uint64_t(call.args[1]) + 4 > (uint64_t(1) << 32)) return;
             auto capacity = dyn_cast_or_null<klee::ConstantExpr>(state->mem()->read(call.args[1], klee::Expr::Int32));
