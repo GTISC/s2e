@@ -907,6 +907,9 @@ void FunctionCallLogger::recordCategory(S2EExecutionState *state, const Observed
         out << ",\"process_command_line_hex\":\"" << inputHex(call.value)
             << "\",\"process_startup_info_concrete\":" << (call.bufferConcrete ? "true" : "false")
             << ",\"process_startup_info_hex\":\"" << inputHex(call.bufferPrefix) << "\"";
+    if (call.api == "PowerWriteACValueIndex" || call.api == "PowerSetActiveScheme")
+        out << ",\"power_input_guids_concrete\":" << (call.bufferConcrete ? "true" : "false")
+            << ",\"power_input_guids_hex\":\"" << inputHex(call.bufferPrefix) << "\"";
     if (call.api == "UpdateProcThreadAttribute")
         out << ",\"parent_attribute_concrete\":" << (call.bufferConcrete ? "true" : "false")
             << ",\"parent_attribute_value_hex\":\"" << inputHex(call.bufferPrefix)
@@ -967,6 +970,7 @@ void FunctionCallLogger::recordCategory(S2EExecutionState *state, const Observed
         if (call.api == "GetExtendedTcpTable" && result == 0) output(1, 4);
         if (call.api == "NetUserModalsGet" && result == 0) output(2, 4);
         if (call.api == "NetUserGetInfo" && result == 0) output(3, 4);
+        if (call.api == "PowerGetActiveScheme" && result == 0) output(1, 4);
         if (wallTime || fileTime) output(0, wallTime ? 16 : 8);
         if ((call.api == "NtOpenFile" || call.api == "ZwOpenFile") && result == 0) {
             output(0, 4);
@@ -1011,6 +1015,23 @@ void FunctionCallLogger::recordCategory(S2EExecutionState *state, const Observed
                 << ",\"created_process_handle_pid\":" << handlePid;
         }
 
+        if (call.api == "PowerGetActiveScheme") {
+            uint32_t address = 0;
+            auto pointer = (result == 0 && call.args[1] && uint64_t(call.args[1]) + 4 <= (uint64_t(1) << 32)) ?
+                dyn_cast_or_null<klee::ConstantExpr>(state->mem()->read(call.args[1], klee::Expr::Int32)) : nullptr;
+            if (pointer) address = pointer->getZExtValue();
+            bool concrete = pointer && address && uint64_t(address) + 16 <= (uint64_t(1) << 32);
+            std::string data;
+            for (unsigned i = 0; concrete && i < 16; ++i) {
+                auto c = dyn_cast_or_null<klee::ConstantExpr>(state->mem()->read(uint64_t(address) + i, klee::Expr::Int8));
+                if (!c) { concrete = false; break; }
+                data += char(c->getZExtValue());
+            }
+            if (!concrete) data.clear();
+            out << ",\"power_active_guid_address\":" << address
+                << ",\"power_active_guid_concrete\":" << (concrete ? "true" : "false")
+                << ",\"power_active_guid_hex\":\"" << inputHex(data) << "\"";
+        }
         if (call.api == "NetUserModalsGet" || call.api == "GetExtendedTcpTable" || call.api == "NetUserGetInfo") {
             uint32_t address = 0, size = 0;
             auto readConcrete32 = [&](uint64_t p, uint32_t &v) {
@@ -1253,7 +1274,7 @@ void FunctionCallLogger::onCall(S2EExecutionState *state, const ModuleDescriptor
     const bool networkModule = dest->Name == "ws2_32.dll";
     const bool audioModule = dest->Name == "winmm.dll";
     if (dest->Name != "kernel32.dll" && dest->Name != "kernelbase.dll" && dest->Name != "advapi32.dll" &&
-        dest->Name != "user32.dll" && dest->Name != "netapi32.dll" && dest->Name != "samcli.dll" && dest->Name != "wevtapi.dll" && dest->Name != "ntdll.dll" && dest->Name != "crypt32.dll" && dest->Name != "iphlpapi.dll" && dest->Name != "setupapi.dll" && dest->Name != "cryptdlg.dll" && dest->Name != "msvcrt.dll" &&
+        dest->Name != "user32.dll" && dest->Name != "netapi32.dll" && dest->Name != "samcli.dll" && dest->Name != "wevtapi.dll" && dest->Name != "ntdll.dll" && dest->Name != "crypt32.dll" && dest->Name != "iphlpapi.dll" && dest->Name != "setupapi.dll" && dest->Name != "cryptdlg.dll" && dest->Name != "msvcrt.dll" && dest->Name != "powrprof.dll" &&
         !(m_observeNetwork && networkModule) && !(m_observeAudio && audioModule))
         return;
     ObservedWindowsCall call;
@@ -1293,6 +1314,7 @@ void FunctionCallLogger::onCall(S2EExecutionState *state, const ModuleDescriptor
         {"CertAddEncodedCertificateToStore", 6}, {"CertAddCertificateContextToStore", 4},
         {"NetUserAdd", 4}, {"NetLocalGroupAddMembers", 5}, {"NetUserModalsGet", 3},
         {"NetUserGetInfo", 4}, {"NetUserDel", 2},
+        {"PowerGetActiveScheme", 2}, {"PowerWriteACValueIndex", 5}, {"PowerSetActiveScheme", 2},
         {"SetFileAttributesA", 2}, {"SetFileAttributesW", 2}, {"GetExtendedTcpTable", 6}, {"SetupDiEnumDeviceInfo", 3},
         {"DllRegisterServer", 0},
         {"CreateProcessAsUserA", 11}, {"CreateProcessAsUserW", 11}, {"CreateProcessWithTokenW", 9},
@@ -1322,6 +1344,7 @@ void FunctionCallLogger::onCall(S2EExecutionState *state, const ModuleDescriptor
         {"CertAddEncodedCertificateToStore", 6}, {"CertAddCertificateContextToStore", 4},
         {"NetUserAdd", 4}, {"NetLocalGroupAddMembers", 5}, {"NetUserModalsGet", 3},
         {"NetUserGetInfo", 4}, {"NetUserDel", 2},
+        {"PowerGetActiveScheme", 2}, {"PowerWriteACValueIndex", 5}, {"PowerSetActiveScheme", 2},
         {"SetFileAttributesA", 2}, {"SetFileAttributesW", 2}, {"GetExtendedTcpTable", 6}, {"SetupDiEnumDeviceInfo", 3},
         {"DllRegisterServer", 0},
         {"CreateProcessAsUserA", 11}, {"CreateProcessAsUserW", 11}, {"CreateProcessWithTokenW", 9},
@@ -1483,6 +1506,20 @@ void FunctionCallLogger::onCall(S2EExecutionState *state, const ModuleDescriptor
                 if (!c) { call.bufferConcrete = false; call.bufferPrefix.clear(); break; }
                 call.bufferPrefix += char(c->getZExtValue());
             }
+        }
+        if (call.api == "PowerWriteACValueIndex" || call.api == "PowerSetActiveScheme") {
+            const unsigned count = call.api == "PowerWriteACValueIndex" ? 3 : 1;
+            call.bufferConcrete = true;
+            for (unsigned g = 1; call.bufferConcrete && g <= count; ++g) {
+                const uint32_t address = call.args[g];
+                if (!address || uint64_t(address) + 16 > (uint64_t(1) << 32)) { call.bufferConcrete = false; break; }
+                for (unsigned j = 0; j < 16; ++j) {
+                    auto c = dyn_cast_or_null<klee::ConstantExpr>(state->mem()->read(uint64_t(address) + j, klee::Expr::Int8));
+                    if (!c) { call.bufferConcrete = false; break; }
+                    call.bufferPrefix += char(c->getZExtValue());
+                }
+            }
+            if (!call.bufferConcrete) call.bufferPrefix.clear();
         }
         if (call.api == "UpdateProcThreadAttribute") {
             uint32_t parentHandle = 0;
