@@ -986,6 +986,7 @@ void FunctionCallLogger::recordCategory(S2EExecutionState *state, const Observed
         if (call.api == "NetUserGetInfo" && result == 0) output(3, 4);
         if (call.api == "PowerGetActiveScheme" && result == 0) output(1, 4);
         if (call.api == "QueryServiceStatus" && result) output(1, 28);
+        if ((call.api == "QueryServiceConfigA" || call.api == "QueryServiceConfigW") && result) output(1, 36);
         if (call.api == "QueryServiceStatusEx" && result && call.args[1] == 0 && call.args[3] >= 36) output(2, 36);
         if (wallTime || fileTime) output(0, wallTime ? 16 : 8);
         if ((call.api == "NtOpenFile" || call.api == "ZwOpenFile") && result == 0) {
@@ -1031,6 +1032,42 @@ void FunctionCallLogger::recordCategory(S2EExecutionState *state, const Observed
                 << ",\"created_process_handle_pid\":" << handlePid;
         }
 
+        if (call.api == "QueryServiceConfigA" || call.api == "QueryServiceConfigW") {
+            const uint64_t base = call.args[1], end = base + call.args[2];
+            bool valid = result && base && call.args[2] >= 36 && call.args[2] <= 8192 && end <= (uint64_t(1) << 32);
+            std::string prefix;
+            for (unsigned i = 0; valid && i < 36; ++i) {
+                auto c = dyn_cast_or_null<klee::ConstantExpr>(state->mem()->read(base + i, klee::Expr::Int8));
+                if (!c) { valid = false; break; }
+                prefix += char(c->getZExtValue());
+            }
+            out << ",\"service_config_strings\":[";
+            for (unsigned member = 0; member < 2; ++member) {
+                const unsigned offset = member ? 32 : 12, width = call.api.back() == 'W' ? 2 : 1;
+                uint32_t address = 0;
+                if (valid) for (unsigned i = 0; i < 4; ++i)
+                    address |= uint32_t(static_cast<unsigned char>(prefix[offset + i])) << (8 * i);
+                bool concrete = valid && address >= base + 36 && address < end && address % width == 0;
+                bool terminated = false;
+                std::string text;
+                for (unsigned i = 0; concrete && i < 512; ++i) {
+                    const uint64_t cursor = uint64_t(address) + i * width;
+                    if (cursor + width > end) { concrete = false; break; }
+                    auto c = dyn_cast_or_null<klee::ConstantExpr>(state->mem()->read(cursor, width == 2 ? klee::Expr::Int16 : klee::Expr::Int8));
+                    if (!c || c->getZExtValue() > 127) { concrete = false; break; }
+                    if (!c->getZExtValue()) { terminated = true; break; }
+                    text += char(c->getZExtValue());
+                }
+                concrete = concrete && terminated;
+                if (!concrete) text.clear();
+                if (member) out << ',';
+                out << "{\"field\":\"" << (member ? "display_name" : "binary_path")
+                    << "\",\"address\":" << address << ",\"concrete\":" << (concrete ? "true" : "false")
+                    << ",\"hex\":\"" << inputHex(text) << "\"}";
+            }
+            out << ']';
+            // pcbBytesNeeded is undefined on success and is deliberately not read.
+        }
         if (call.api == "PowerGetActiveScheme") {
             uint32_t address = 0;
             auto pointer = (result == 0 && call.args[1] && uint64_t(call.args[1]) + 4 <= (uint64_t(1) << 32)) ?
@@ -1336,6 +1373,7 @@ void FunctionCallLogger::onCall(S2EExecutionState *state, const ModuleDescriptor
         {"OpenSCManagerA", 3}, {"OpenSCManagerW", 3}, {"CreateServiceA", 13}, {"CreateServiceW", 13},
         {"OpenServiceA", 3}, {"OpenServiceW", 3}, {"StartServiceA", 3}, {"StartServiceW", 3},
         {"QueryServiceStatus", 2}, {"QueryServiceStatusEx", 5}, {"CloseServiceHandle", 1},
+        {"QueryServiceConfigA", 4}, {"QueryServiceConfigW", 4},
         {"SetFileAttributesA", 2}, {"SetFileAttributesW", 2}, {"GetExtendedTcpTable", 6}, {"SetupDiEnumDeviceInfo", 3},
         {"DllRegisterServer", 0},
         {"CreateProcessAsUserA", 11}, {"CreateProcessAsUserW", 11}, {"CreateProcessWithTokenW", 9},
@@ -1371,6 +1409,7 @@ void FunctionCallLogger::onCall(S2EExecutionState *state, const ModuleDescriptor
         {"OpenSCManagerA", 3}, {"OpenSCManagerW", 3}, {"CreateServiceA", 13}, {"CreateServiceW", 13},
         {"OpenServiceA", 3}, {"OpenServiceW", 3}, {"StartServiceA", 3}, {"StartServiceW", 3},
         {"QueryServiceStatus", 2}, {"QueryServiceStatusEx", 5}, {"CloseServiceHandle", 1},
+        {"QueryServiceConfigA", 4}, {"QueryServiceConfigW", 4},
         {"SetFileAttributesA", 2}, {"SetFileAttributesW", 2}, {"GetExtendedTcpTable", 6}, {"SetupDiEnumDeviceInfo", 3},
         {"DllRegisterServer", 0},
         {"CreateProcessAsUserA", 11}, {"CreateProcessAsUserW", 11}, {"CreateProcessWithTokenW", 9},
