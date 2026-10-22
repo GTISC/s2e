@@ -665,9 +665,12 @@ void FunctionCallLogger::observeInput(S2EExecutionState *state, const ObservedWi
     } else if (call.api.find("GetCommandLine") == 0) {
         if (!result) return;
         buffer = result;
-        // Include the concrete terminator; reject truncated or symbolic strings.
-        for (unsigned offset = 0; offset < 256; offset += width) {
-            auto c = dyn_cast_or_null<klee::ConstantExpr>(state->mem()->read(buffer + offset,
+        // Passive capture uses the existing 4 KiB input-observation budget.
+        // Selected symbolic sources retain their separate 256-byte/16-offset limits.
+        // Include a concrete terminator and reject truncation, symbolic units and wraparound.
+        for (unsigned offset = 0; offset < 4096; offset += width) {
+            if (uint64_t(buffer) + offset + width > (uint64_t(1) << 32)) return;
+            auto c = dyn_cast_or_null<klee::ConstantExpr>(state->mem()->read(uint64_t(buffer) + offset,
                                                        width == 2 ? klee::Expr::Int16 : klee::Expr::Int8));
             if (!c) return;
             if (!c->getZExtValue()) { count = requested = offset + width; break; }
