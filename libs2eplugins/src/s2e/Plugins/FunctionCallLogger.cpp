@@ -1485,6 +1485,11 @@ void FunctionCallLogger::recordLifecycle(S2EExecutionState *state, const Observe
     if (call.api == "GetProcAddress") out << ",\"module_handle\":" << call.args[0];
     if (call.api == "CopyFileA" || call.api == "CopyFileW")
         out << ",\"copy_arguments\":[" << call.args[0] << ',' << call.args[1] << ',' << call.args[2] << ']';
+    if (call.api.find("MoveFile") == 0) {
+        out << ",\"move_arguments\":[" << call.args[0] << ',' << call.args[1];
+        if (call.argumentCount == 3) out << ',' << call.args[2];
+        out << ']';
+    }
     if (io) {
         out << ",\"overlapped\":" << (call.args[4] ? "true" : "false")
             << ",\"count_address\":" << call.args[3];
@@ -1650,6 +1655,7 @@ void FunctionCallLogger::onCall(S2EExecutionState *state, const ModuleDescriptor
     static const std::map<std::string, unsigned> supported = {
         {"CredEnumerateA", 4}, {"CredEnumerateW", 4},
         {"CreateFileA", 7},   {"CreateFileW", 7},     {"CopyFileA", 3},       {"CopyFileW", 3},
+        {"MoveFileA", 2}, {"MoveFileW", 2}, {"MoveFileExA", 3}, {"MoveFileExW", 3},
         {"WriteFile", 5},     {"CloseHandle", 1},     {"RegCloseKey", 1},     {"RegOpenKeyExA", 5},
         {"RegOpenKeyExW", 5}, {"RegOpenKeyA", 3}, {"RegOpenKeyW", 3},
         {"RegSaveKeyA", 3}, {"RegSaveKeyW", 3}, {"RegSaveKeyExA", 4}, {"RegSaveKeyExW", 4}, {"RegCreateKeyExA", 9}, {"RegCreateKeyExW", 9}, {"RegSetValueExA", 6},
@@ -2119,14 +2125,17 @@ void FunctionCallLogger::onCall(S2EExecutionState *state, const ModuleDescriptor
     } else if (call.api == "GetProcAddress") {
         call.path.clear();
         if (!readText(call.args[1], call.path, 128)) return;
-    } else if (call.api.find("CopyFile") == 0) {
+    } else if (call.api.find("CopyFile") == 0 || call.api.find("MoveFile") == 0) {
         call.path.clear();
-        if (!readText(call.args[1], call.path))
-            return;
+        if (call.args[1]) {
+            if (!readText(call.args[1], call.path)) return;
+        } else if (call.api.find("MoveFileEx") != 0 || !(call.args[2] & 4)) return;
         // Optional source context must not force concretization or hide a
         // completed, concrete destination write.
-        if (!readText(call.args[0], call.value))
+        if (!readText(call.args[0], call.value)) {
+            if (call.api.find("MoveFile") == 0) return;
             call.value.clear();
+        }
     } else if (call.api.find("RegOpenKey") == 0 || call.api.find("RegCreateKey") == 0) {
         std::string subkey;
         if (call.path.empty() || !readText(call.args[1], subkey))
@@ -2157,7 +2166,7 @@ void FunctionCallLogger::onCall(S2EExecutionState *state, const ModuleDescriptor
     // Positive effects use direct non-DLL calls in the monitored process tree.
     // DLL RegCloseKey calls are negative-only evidence that invalidates stale handles.
     // File handles stay state/PID/lifetime local in the existing observer map.
-    bool tracked = call.api.find("CredEnumerate") == 0 || call.api.find("Reg") == 0 || call.api == "ReadFile" || call.api == "WriteFile" || call.api == "GetProcAddress" || call.api == "CopyFileA" || call.api == "CopyFileW" || remoteProcess ||
+    bool tracked = call.api.find("CredEnumerate") == 0 || call.api.find("Reg") == 0 || call.api == "ReadFile" || call.api == "WriteFile" || call.api == "GetProcAddress" || call.api == "CopyFileA" || call.api == "CopyFileW" || call.api.find("MoveFile") == 0 || remoteProcess ||
                    call.api == "CloseHandle" || call.api == "CreateFileA" || call.api == "CreateFileW";
     auto &counted = m_lifecycleCalls[s2e()->getCurrentInstanceIndex()];
     if (tracked && (call.recordEffect || call.api == "RegCloseKey") && !call.diagnostic && counted < 8192) {
