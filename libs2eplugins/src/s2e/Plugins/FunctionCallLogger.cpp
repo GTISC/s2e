@@ -881,7 +881,7 @@ void FunctionCallLogger::recordCategory(S2EExecutionState *state, const Observed
     const bool accountEnum = call.api == "NetUserEnum";
     const bool groupEnum = call.api == "NetGroupEnum" || call.api == "NetLocalGroupEnum";
     const bool enumerated = (accountEnum || groupEnum) && (result == 0 || result == 234);
-    const bool voidResult = wallTime || fileTime || call.api == "keybd_event" || call.api == "mouse_event" || call.api == "DeleteProcThreadAttributeList" || call.api == "Control_RunDLLW";
+    const bool voidResult = wallTime || fileTime || call.api == "keybd_event" || call.api == "mouse_event" || call.api == "DeleteProcThreadAttributeList" || call.api == "Control_RunDLLW" || call.api == "Sleep";
     std::ofstream out(s2e()->getOutputFilename("category-observations.jsonl"), std::ios::app);
     out << "{\"schema\":1,\"instance\":" << s2e()->getCurrentInstanceIndex()
         << ",\"state\":" << state->getID() << ",\"pid\":" << call.pid
@@ -897,6 +897,25 @@ void FunctionCallLogger::recordCategory(S2EExecutionState *state, const Observed
         out << call.args[i];
     }
     out << ']';
+    if (call.api == "Sleep") {
+        // Passive Windows 7 KUSER_SHARED_DATA tick sample. Preserve the raw
+        // low/high/high consistency fields and multiplier at each boundary.
+        // Unavailable or symbolic memory is never faulted in or concretized.
+        const uint32_t addresses[4] = {0x7ffe0320, 0x7ffe0324, 0x7ffe0328, 0x7ffe0004};
+        uint32_t words[4] = {};
+        bool concrete = true;
+        for (unsigned i = 0; i < 4; ++i) {
+            auto c = dyn_cast_or_null<klee::ConstantExpr>(state->mem()->read(addresses[i], klee::Expr::Int32));
+            if (!c) { concrete = false; break; }
+            words[i] = c->getZExtValue();
+        }
+        out << ",\"delay_clock_concrete\":" << (concrete ? "true" : "false")
+            << ",\"delay_clock_words\":[";
+        if (concrete) {
+            for (unsigned i = 0; i < 4; ++i) { if (i) out << ','; out << words[i]; }
+        }
+        out << ']';
+    }
     if (computerName) out << ",\"input_capacity\":" << call.requested;
     if (accountEnum || groupEnum)
         out << ",\"server_name_concrete\":" << (call.bufferConcrete ? "true" : "false")
@@ -1417,7 +1436,7 @@ void FunctionCallLogger::onCall(S2EExecutionState *state, const ModuleDescriptor
         {"CreateProcessA", 10}, {"CreateProcessW", 10}, {"InitializeProcThreadAttributeList", 4},
         {"UpdateProcThreadAttribute", 7}, {"DeleteProcThreadAttributeList", 1}, {"GetLastError", 0},
         {"_open", 2}, {"_write", 3}, {"_close", 1}, {"_open_osfhandle", 2}, {"_read", 3}, {"_lseek", 3},
-        {"DeviceIoControl", 8}, {"GetFileSizeEx", 2}, {"SetConsoleNumberOfCommandsW", 2},
+        {"DeviceIoControl", 8}, {"GetFileSizeEx", 2}, {"SetConsoleNumberOfCommandsW", 2}, {"Sleep", 1},
         {"GetConsoleCommandHistoryLengthW", 1}, {"ExpungeConsoleCommandHistoryW", 1},
         {"NetGroupEnum", 7}, {"NetLocalGroupEnum", 7}, {"NetUserEnum", 8}};
     static const std::map<std::string, unsigned> supported = {
@@ -1455,7 +1474,7 @@ void FunctionCallLogger::onCall(S2EExecutionState *state, const ModuleDescriptor
         {"CreateProcessA", 10}, {"CreateProcessW", 10}, {"InitializeProcThreadAttributeList", 4},
         {"UpdateProcThreadAttribute", 7}, {"DeleteProcThreadAttributeList", 1}, {"GetLastError", 0},
         {"_open", 2}, {"_write", 3}, {"_close", 1}, {"_open_osfhandle", 2}, {"_read", 3}, {"_lseek", 3},
-        {"DeviceIoControl", 8}, {"GetFileSizeEx", 2}, {"SetConsoleNumberOfCommandsW", 2},
+        {"DeviceIoControl", 8}, {"GetFileSizeEx", 2}, {"SetConsoleNumberOfCommandsW", 2}, {"Sleep", 1},
         {"GetConsoleCommandHistoryLengthW", 1}, {"ExpungeConsoleCommandHistoryW", 1},
         {"NetGroupEnum", 7}, {"NetLocalGroupEnum", 7}, {"NetUserEnum", 8},
         {"GetFileAttributesA", 1}, {"GetFileAttributesW", 1}, {"FindFirstFileA", 2}, {"FindFirstFileW", 2},
@@ -1958,7 +1977,7 @@ void FunctionCallLogger::onReturn(S2EExecutionState *state, const ModuleDescript
         uint32_t categoryResult = 0;
         const bool voidResult = call.api == "GetSystemTime" || call.api == "GetLocalTime" ||
             call.api == "GetSystemTimeAsFileTime" || call.api == "GetSystemTimePreciseAsFileTime" ||
-            call.api == "keybd_event" || call.api == "mouse_event" || call.api == "DeleteProcThreadAttributeList" || call.api == "Control_RunDLLW";
+            call.api == "keybd_event" || call.api == "mouse_event" || call.api == "DeleteProcThreadAttributeList" || call.api == "Control_RunDLLW" || call.api == "Sleep";
         if (!voidResult && !state->regs()->read(CPU_OFFSET(regs[R_EAX]), &categoryResult, 4, false)) return;
         if (!diagnostic) recordCategory(state, call, true, categoryResult);
         return;
