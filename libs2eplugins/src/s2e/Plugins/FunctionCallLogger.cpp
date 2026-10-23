@@ -926,6 +926,9 @@ void FunctionCallLogger::recordCategory(S2EExecutionState *state, const Observed
         out << ",\"crt_buffer_address\":" << call.args[1]
             << ",\"crt_buffer_concrete\":" << (call.bufferConcrete ? "true" : "false")
             << ",\"crt_buffer_hex\":\"" << inputHex(call.bufferPrefix) << "\"";
+    if (call.api == "DeviceIoControl")
+        out << ",\"zero_data_input_concrete\":" << (call.bufferConcrete ? "true" : "false")
+            << ",\"zero_data_input_hex\":\"" << inputHex(call.bufferPrefix) << "\"";
     if (call.api == "_read") {
         // Capture only a bounded concrete prefix of the native returned bytes.
         // Never solve, concretize, read past the requested count, or snapshot
@@ -1006,6 +1009,8 @@ void FunctionCallLogger::recordCategory(S2EExecutionState *state, const Observed
         if (call.api == "QueryServiceStatus" && result) output(1, 28);
         if ((call.api == "QueryServiceConfigA" || call.api == "QueryServiceConfigW") && result) output(1, 36);
         if (call.api == "QueryServiceStatusEx" && result && call.args[1] == 0 && call.args[3] >= 36) output(2, 36);
+        if (call.api == "GetFileSizeEx" && result) output(1, 8);
+        if (call.api == "DeviceIoControl" && result && call.args[6] && !call.args[7]) output(6, 4);
         if (wallTime || fileTime) output(0, wallTime ? 16 : 8);
         if ((call.api == "NtOpenFile" || call.api == "ZwOpenFile") && result == 0) {
             output(0, 4);
@@ -1398,6 +1403,8 @@ void FunctionCallLogger::onCall(S2EExecutionState *state, const ModuleDescriptor
         {"CreateProcessA", 10}, {"CreateProcessW", 10}, {"InitializeProcThreadAttributeList", 4},
         {"UpdateProcThreadAttribute", 7}, {"DeleteProcThreadAttributeList", 1}, {"GetLastError", 0},
         {"_open", 2}, {"_write", 3}, {"_close", 1}, {"_open_osfhandle", 2}, {"_read", 3}, {"_lseek", 3},
+        {"DeviceIoControl", 8}, {"GetFileSizeEx", 2}, {"SetConsoleNumberOfCommandsW", 2},
+        {"GetConsoleCommandHistoryLengthW", 1}, {"ExpungeConsoleCommandHistoryW", 1},
         {"NetGroupEnum", 7}, {"NetLocalGroupEnum", 7}, {"NetUserEnum", 8}};
     static const std::map<std::string, unsigned> supported = {
         {"CredEnumerateA", 4}, {"CredEnumerateW", 4},
@@ -1434,6 +1441,8 @@ void FunctionCallLogger::onCall(S2EExecutionState *state, const ModuleDescriptor
         {"CreateProcessA", 10}, {"CreateProcessW", 10}, {"InitializeProcThreadAttributeList", 4},
         {"UpdateProcThreadAttribute", 7}, {"DeleteProcThreadAttributeList", 1}, {"GetLastError", 0},
         {"_open", 2}, {"_write", 3}, {"_close", 1}, {"_open_osfhandle", 2}, {"_read", 3}, {"_lseek", 3},
+        {"DeviceIoControl", 8}, {"GetFileSizeEx", 2}, {"SetConsoleNumberOfCommandsW", 2},
+        {"GetConsoleCommandHistoryLengthW", 1}, {"ExpungeConsoleCommandHistoryW", 1},
         {"NetGroupEnum", 7}, {"NetLocalGroupEnum", 7}, {"NetUserEnum", 8},
         {"GetFileAttributesA", 1}, {"GetFileAttributesW", 1}, {"FindFirstFileA", 2}, {"FindFirstFileW", 2},
         {"VirtualAllocEx", 5}, {"WriteProcessMemory", 5}, {"VirtualProtectEx", 5}, {"CreateRemoteThread", 7},
@@ -1642,6 +1651,22 @@ void FunctionCallLogger::onCall(S2EExecutionState *state, const ModuleDescriptor
                 if (parent <= UINT32_MAX) call.targetPid = parent;
             }
         }
+        if (call.api == "DeviceIoControl" || call.api == "GetFileSizeEx") {
+            DECLARE_PLUGINSTATE(FunctionCallLoggerState, state);
+            auto known = plgState->fileHandles.find(std::make_tuple(call.pid, call.lifetime, call.args[0]));
+            if (known != plgState->fileHandles.end()) call.path = known->second;
+            if (call.api == "DeviceIoControl" && call.args[1] == 0x980c8 && call.args[3] == 16) {
+                call.bufferConcrete = call.args[2] && uint64_t(call.args[2]) + 16 <= (uint64_t(1) << 32);
+                for (unsigned j = 0; call.bufferConcrete && j < 16; ++j) {
+                    auto c = dyn_cast_or_null<klee::ConstantExpr>(state->mem()->read(uint64_t(call.args[2]) + j, klee::Expr::Int8));
+                    if (!c) { call.bufferConcrete = false; call.bufferPrefix.clear(); break; }
+                    call.bufferPrefix += char(c->getZExtValue());
+                }
+            }
+        }
+        if (call.api == "SetConsoleNumberOfCommandsW" && !readText(call.args[1], call.path, 256)) return;
+        if ((call.api == "GetConsoleCommandHistoryLengthW" || call.api == "ExpungeConsoleCommandHistoryW") &&
+            !readText(call.args[0], call.path, 256)) return;
         if (call.api == "_open" && !readText(call.args[0], call.path)) return;
         if (call.api == "_write") {
             call.requested = std::min(call.args[2], uint32_t(4096));
