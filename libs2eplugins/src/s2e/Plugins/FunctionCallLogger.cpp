@@ -1163,6 +1163,11 @@ void FunctionCallLogger::recordCategory(S2EExecutionState *state, const Observed
         out << ",\"parent_attribute_concrete\":" << (call.bufferConcrete ? "true" : "false")
             << ",\"parent_attribute_value_hex\":\"" << inputHex(call.bufferPrefix)
             << "\",\"requested_parent_pid\":" << call.targetPid;
+    if (call.api == "fopen" || call.api == "_wfopen")
+        out << ",\"stdio_mode_hex\":\"" << inputHex(call.value) << "\"";
+    if (call.api == "fwrite")
+        out << ",\"stdio_buffer_concrete\":" << (call.bufferConcrete ? "true" : "false")
+            << ",\"stdio_buffer_hex\":\"" << inputHex(call.bufferPrefix) << "\"";
     if (call.api == "_write")
         out << ",\"crt_buffer_address\":" << call.args[1]
             << ",\"crt_buffer_concrete\":" << (call.bufferConcrete ? "true" : "false")
@@ -1513,6 +1518,33 @@ void FunctionCallLogger::recordLifecycle(S2EExecutionState *state, const Observe
         if (call.argumentCount == 3) out << ',' << call.args[2];
         out << ']';
     }
+    if (call.api == "ReadFile") {
+        auto read32 = [&](uint64_t address, uint32_t &value) {
+            if (!address || address + 4 > (uint64_t(1) << 32)) return false;
+            auto c = dyn_cast_or_null<klee::ConstantExpr>(state->mem()->read(address, klee::Expr::Int32));
+            if (!c) return false;
+            value = c->getZExtValue(); return true;
+        };
+        uint32_t low = 0, high = 0, count = 0;
+        bool offsetConcrete = call.args[4] && uint64_t(call.args[4]) + 20 <= (uint64_t(1) << 32) &&
+            read32(uint64_t(call.args[4]) + 8, low) && read32(uint64_t(call.args[4]) + 12, high);
+        bool complete = returned && result == 1 && read32(call.args[3], count) && count <= call.args[2];
+        std::string bytes;
+        bool concrete = complete && count && count <= 4096 && call.args[1] &&
+            uint64_t(call.args[1]) + count <= (uint64_t(1) << 32);
+        for (uint32_t i = 0; concrete && i < count; ++i) {
+            auto c = dyn_cast_or_null<klee::ConstantExpr>(state->mem()->read(uint64_t(call.args[1]) + i, klee::Expr::Int8));
+            if (!c) { concrete = false; bytes.clear(); break; }
+            bytes += char(c->getZExtValue());
+        }
+        out << ",\"read_offset_concrete\":" << (offsetConcrete ? "true" : "false")
+            << ",\"read_offset\":" << (offsetConcrete ? (uint64_t(high) << 32 | low) : 0)
+            << ",\"completed_read_count_concrete\":" << (complete ? "true" : "false")
+            << ",\"completed_read_count\":" << (complete ? count : 0)
+            << ",\"read_buffer_address\":" << call.args[1]
+            << ",\"read_buffer_concrete\":" << (concrete ? "true" : "false")
+            << ",\"read_buffer_hex\":\"" << inputHex(bytes) << "\"";
+    }
     if (io) {
         out << ",\"overlapped\":" << (call.args[4] ? "true" : "false")
             << ",\"count_address\":" << call.args[3];
@@ -1672,6 +1704,7 @@ void FunctionCallLogger::onCall(S2EExecutionState *state, const ModuleDescriptor
         {"CreateProcessA", 10}, {"CreateProcessW", 10}, {"InitializeProcThreadAttributeList", 4},
         {"UpdateProcThreadAttribute", 7}, {"DeleteProcThreadAttributeList", 1}, {"GetLastError", 0},
         {"_open", 2}, {"_write", 3}, {"_close", 1}, {"_open_osfhandle", 2}, {"_read", 3}, {"_lseek", 3},
+        {"fopen", 2}, {"_wfopen", 2}, {"fclose", 1}, {"fwrite", 4},
         {"DeviceIoControl", 8}, {"GetFileSizeEx", 2}, {"SetConsoleNumberOfCommandsW", 2}, {"Sleep", 1},
         {"GetConsoleCommandHistoryLengthW", 1}, {"ExpungeConsoleCommandHistoryW", 1},
         {"FindFirstFileW", 2}, {"FindNextFileW", 2}, {"FindClose", 1},
@@ -1713,6 +1746,7 @@ void FunctionCallLogger::onCall(S2EExecutionState *state, const ModuleDescriptor
         {"CreateProcessA", 10}, {"CreateProcessW", 10}, {"InitializeProcThreadAttributeList", 4},
         {"UpdateProcThreadAttribute", 7}, {"DeleteProcThreadAttributeList", 1}, {"GetLastError", 0},
         {"_open", 2}, {"_write", 3}, {"_close", 1}, {"_open_osfhandle", 2}, {"_read", 3}, {"_lseek", 3},
+        {"fopen", 2}, {"_wfopen", 2}, {"fclose", 1}, {"fwrite", 4},
         {"DeviceIoControl", 8}, {"GetFileSizeEx", 2}, {"SetConsoleNumberOfCommandsW", 2}, {"Sleep", 1},
         {"GetConsoleCommandHistoryLengthW", 1}, {"ExpungeConsoleCommandHistoryW", 1},
         {"NetGroupEnum", 7}, {"NetLocalGroupEnum", 7}, {"NetUserEnum", 8},
@@ -1828,7 +1862,7 @@ void FunctionCallLogger::onCall(S2EExecutionState *state, const ModuleDescriptor
         return;
     }
     const bool adminNet = call.api == "NetUserAdd" || call.api == "NetLocalGroupAddMembers" || call.api == "NetUserModalsGet" || call.api == "NetUserGetInfo" || call.api == "NetUserDel";
-    const bool wide = call.api == "NetScheduleJobAdd" || adminNet || call.api.back() == 'W' || call.api == "EvtClearLog" || call.api == "EvtQuery" || call.api == "NtOpenFile" || call.api == "ZwOpenFile" ||
+    const bool wide = call.api == "_wfopen" || call.api == "NetScheduleJobAdd" || adminNet || call.api.back() == 'W' || call.api == "EvtClearLog" || call.api == "EvtQuery" || call.api == "NtOpenFile" || call.api == "ZwOpenFile" ||
         (call.api == "CertOpenStore" && (call.args[0] == 10 || call.args[0] == 13));
     auto readText = [&](uint64_t address, std::string &text, unsigned bound = 512, bool boundedData = false) {
         if (!address)
@@ -1979,6 +2013,18 @@ void FunctionCallLogger::onCall(S2EExecutionState *state, const ModuleDescriptor
             !readText(call.args[0], call.path, 256)) return;
         if (call.api == "Control_RunDLLW" && call.args[2] && !readText(call.args[2], call.path, 256)) return;
         if (call.api == "FindFirstFileW" && !readText(call.args[0], call.path, 512)) return;
+        if ((call.api == "fopen" || call.api == "_wfopen") &&
+            (!readText(call.args[0], call.path) || !readText(call.args[1], call.value, 16))) return;
+        if (call.api == "fwrite") {
+            uint64_t total = uint64_t(call.args[1]) * call.args[2];
+            call.bufferConcrete = total && total <= 4096 && call.args[0] &&
+                uint64_t(call.args[0]) + total <= (uint64_t(1) << 32);
+            for (uint32_t i = 0; call.bufferConcrete && i < total; ++i) {
+                auto c = dyn_cast_or_null<klee::ConstantExpr>(state->mem()->read(uint64_t(call.args[0]) + i, klee::Expr::Int8));
+                if (!c) { call.bufferConcrete = false; call.bufferPrefix.clear(); break; }
+                call.bufferPrefix += char(c->getZExtValue());
+            }
+        }
         if (call.api == "_open" && !readText(call.args[0], call.path)) return;
         if (call.api == "_write") {
             call.requested = std::min(call.args[2], uint32_t(4096));
@@ -2150,7 +2196,8 @@ void FunctionCallLogger::onCall(S2EExecutionState *state, const ModuleDescriptor
         // The observed msvcrt functions use cdecl; _open's optional mode argument
         // is not needed for data-write evidence and must not be guessed/read.
         returnSignal->stackCleanup = (call.api == "_open" || call.api == "_write" || call.api == "_close" ||
-            call.api == "_open_osfhandle" || call.api == "_read" || call.api == "_lseek") ? 0 : 4 * count->second;
+            call.api == "_open_osfhandle" || call.api == "_read" || call.api == "_lseek" ||
+            call.api == "fopen" || call.api == "_wfopen" || call.api == "fclose" || call.api == "fwrite") ? 0 : 4 * count->second;
         returnSignal->connect(sigc::bind(sigc::mem_fun(*this, &FunctionCallLogger::onReturn), call));
         return;
     }
@@ -2175,7 +2222,7 @@ void FunctionCallLogger::onCall(S2EExecutionState *state, const ModuleDescriptor
         call.path.clear();
         if (!call.args[2] || !call.args[3] || (call.args[0] && !readText(call.args[0], call.path))) return;
     } else if (call.api == "ReadFile") {
-        if (call.path.empty() || call.args[4]) return;
+        if (call.path.empty()) return;
         call.requested = call.args[2];
     } else if (call.api.find("RegQueryValueEx") == 0) {
         if (call.path.empty() || (call.args[1] && !readText(call.args[1], call.value)) ||
