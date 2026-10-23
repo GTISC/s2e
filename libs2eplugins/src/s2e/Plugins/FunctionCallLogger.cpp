@@ -916,6 +916,30 @@ void FunctionCallLogger::recordCategory(S2EExecutionState *state, const Observed
         }
         out << ']';
     }
+    if (returned && (call.api == "FindFirstFileW" || call.api == "FindNextFileW")) {
+        uint32_t attributes = 0, high = 0, low = 0;
+        std::string filename;
+        bool concrete = call.args[1] && uint64_t(call.args[1]) + 592 <= (uint64_t(1) << 32) &&
+            (call.api == "FindFirstFileW" ? result != UINT32_MAX && result != 0 : result == 1);
+        auto word = [&](unsigned offset, uint32_t &value) {
+            auto c = dyn_cast_or_null<klee::ConstantExpr>(state->mem()->read(uint64_t(call.args[1]) + offset, klee::Expr::Int32));
+            if (!c) return false;
+            value = c->getZExtValue(); return true;
+        };
+        concrete = concrete && word(0, attributes) && word(28, high) && word(32, low);
+        bool terminated = false;
+        for (unsigned i = 0; concrete && i < 260; ++i) {
+            auto c = dyn_cast_or_null<klee::ConstantExpr>(state->mem()->read(uint64_t(call.args[1]) + 44 + i * 2, klee::Expr::Int16));
+            if (!c || c->getZExtValue() > 127) { concrete = false; break; }
+            if (!c->getZExtValue()) { terminated = true; break; }
+            filename += char(c->getZExtValue());
+        }
+        concrete = concrete && terminated && !filename.empty();
+        if (!concrete) { filename.clear(); attributes = high = low = 0; }
+        out << ",\"find_data_concrete\":" << (concrete ? "true" : "false")
+            << ",\"find_name_hex\":\"" << inputHex(filename) << "\",\"find_attributes\":" << attributes
+            << ",\"find_file_size\":" << ((uint64_t(high) << 32) | low);
+    }
     if (computerName) out << ",\"input_capacity\":" << call.requested;
     if (accountEnum || groupEnum)
         out << ",\"server_name_concrete\":" << (call.bufferConcrete ? "true" : "false")
@@ -1438,6 +1462,7 @@ void FunctionCallLogger::onCall(S2EExecutionState *state, const ModuleDescriptor
         {"_open", 2}, {"_write", 3}, {"_close", 1}, {"_open_osfhandle", 2}, {"_read", 3}, {"_lseek", 3},
         {"DeviceIoControl", 8}, {"GetFileSizeEx", 2}, {"SetConsoleNumberOfCommandsW", 2}, {"Sleep", 1},
         {"GetConsoleCommandHistoryLengthW", 1}, {"ExpungeConsoleCommandHistoryW", 1},
+        {"FindFirstFileW", 2}, {"FindNextFileW", 2}, {"FindClose", 1},
         {"NetGroupEnum", 7}, {"NetLocalGroupEnum", 7}, {"NetUserEnum", 8}};
     static const std::map<std::string, unsigned> supported = {
         {"CredEnumerateA", 4}, {"CredEnumerateW", 4},
@@ -1477,7 +1502,7 @@ void FunctionCallLogger::onCall(S2EExecutionState *state, const ModuleDescriptor
         {"DeviceIoControl", 8}, {"GetFileSizeEx", 2}, {"SetConsoleNumberOfCommandsW", 2}, {"Sleep", 1},
         {"GetConsoleCommandHistoryLengthW", 1}, {"ExpungeConsoleCommandHistoryW", 1},
         {"NetGroupEnum", 7}, {"NetLocalGroupEnum", 7}, {"NetUserEnum", 8},
-        {"GetFileAttributesA", 1}, {"GetFileAttributesW", 1}, {"FindFirstFileA", 2}, {"FindFirstFileW", 2},
+        {"GetFileAttributesA", 1}, {"GetFileAttributesW", 1}, {"FindFirstFileA", 2}, {"FindFirstFileW", 2}, {"FindNextFileW", 2}, {"FindClose", 1},
         {"VirtualAllocEx", 5}, {"WriteProcessMemory", 5}, {"VirtualProtectEx", 5}, {"CreateRemoteThread", 7},
         {"socket", 3}, {"connect", 3}, {"bind", 3}, {"listen", 2}, {"accept", 3},
         {"send", 4}, {"recv", 4}, {"closesocket", 1},
@@ -1701,6 +1726,7 @@ void FunctionCallLogger::onCall(S2EExecutionState *state, const ModuleDescriptor
         if ((call.api == "GetConsoleCommandHistoryLengthW" || call.api == "ExpungeConsoleCommandHistoryW") &&
             !readText(call.args[0], call.path, 256)) return;
         if (call.api == "Control_RunDLLW" && call.args[2] && !readText(call.args[2], call.path, 256)) return;
+        if (call.api == "FindFirstFileW" && !readText(call.args[0], call.path, 512)) return;
         if (call.api == "_open" && !readText(call.args[0], call.path)) return;
         if (call.api == "_write") {
             call.requested = std::min(call.args[2], uint32_t(4096));
