@@ -926,6 +926,24 @@ void FunctionCallLogger::recordCategory(S2EExecutionState *state, const Observed
         out << ",\"crt_buffer_address\":" << call.args[1]
             << ",\"crt_buffer_concrete\":" << (call.bufferConcrete ? "true" : "false")
             << ",\"crt_buffer_hex\":\"" << inputHex(call.bufferPrefix) << "\"";
+    if (call.api == "_read") {
+        // Capture only a bounded concrete prefix of the native returned bytes.
+        // Never solve, concretize, read past the requested count, or snapshot
+        // uninitialized output memory at function entry / on failure.
+        std::string bytes;
+        const uint32_t count = returned && result < 0x80000000 && result <= call.args[2]
+            ? std::min(result, uint32_t(16384)) : 0;
+        bool concrete = returned && result < 0x80000000 && result <= call.args[2] &&
+            call.args[1] && uint64_t(call.args[1]) + count <= (uint64_t(1) << 32);
+        for (uint32_t i = 0; concrete && i < count; ++i) {
+            auto c = dyn_cast_or_null<klee::ConstantExpr>(state->mem()->read(uint64_t(call.args[1]) + i, klee::Expr::Int8));
+            if (!c) { concrete = false; bytes.clear(); break; }
+            bytes += char(c->getZExtValue());
+        }
+        out << ",\"crt_read_buffer_address\":" << call.args[1]
+            << ",\"crt_read_buffer_concrete\":" << (concrete ? "true" : "false")
+            << ",\"crt_read_buffer_hex\":\"" << inputHex(bytes) << "\"";
+    }
     if (call.api == "DllRegisterServer")
         out << ",\"callback_module_base\":" << call.calleeModuleBase
             << ",\"callback_export_rva\":" << (call.calleePc - call.calleeModuleBase)
@@ -1379,7 +1397,7 @@ void FunctionCallLogger::onCall(S2EExecutionState *state, const ModuleDescriptor
         {"CreateProcessAsUserA", 11}, {"CreateProcessAsUserW", 11}, {"CreateProcessWithTokenW", 9},
         {"CreateProcessA", 10}, {"CreateProcessW", 10}, {"InitializeProcThreadAttributeList", 4},
         {"UpdateProcThreadAttribute", 7}, {"DeleteProcThreadAttributeList", 1}, {"GetLastError", 0},
-        {"_open", 2}, {"_write", 3}, {"_close", 1},
+        {"_open", 2}, {"_write", 3}, {"_close", 1}, {"_open_osfhandle", 2}, {"_read", 3}, {"_lseek", 3},
         {"NetGroupEnum", 7}, {"NetLocalGroupEnum", 7}, {"NetUserEnum", 8}};
     static const std::map<std::string, unsigned> supported = {
         {"CredEnumerateA", 4}, {"CredEnumerateW", 4},
@@ -1415,7 +1433,7 @@ void FunctionCallLogger::onCall(S2EExecutionState *state, const ModuleDescriptor
         {"CreateProcessAsUserA", 11}, {"CreateProcessAsUserW", 11}, {"CreateProcessWithTokenW", 9},
         {"CreateProcessA", 10}, {"CreateProcessW", 10}, {"InitializeProcThreadAttributeList", 4},
         {"UpdateProcThreadAttribute", 7}, {"DeleteProcThreadAttributeList", 1}, {"GetLastError", 0},
-        {"_open", 2}, {"_write", 3}, {"_close", 1},
+        {"_open", 2}, {"_write", 3}, {"_close", 1}, {"_open_osfhandle", 2}, {"_read", 3}, {"_lseek", 3},
         {"NetGroupEnum", 7}, {"NetLocalGroupEnum", 7}, {"NetUserEnum", 8},
         {"GetFileAttributesA", 1}, {"GetFileAttributesW", 1}, {"FindFirstFileA", 2}, {"FindFirstFileW", 2},
         {"VirtualAllocEx", 5}, {"WriteProcessMemory", 5}, {"VirtualProtectEx", 5}, {"CreateRemoteThread", 7},
@@ -1794,7 +1812,8 @@ void FunctionCallLogger::onCall(S2EExecutionState *state, const ModuleDescriptor
         recordCategory(state, call, false, 0);
         // The observed msvcrt functions use cdecl; _open's optional mode argument
         // is not needed for data-write evidence and must not be guessed/read.
-        returnSignal->stackCleanup = (call.api == "_open" || call.api == "_write" || call.api == "_close") ? 0 : 4 * count->second;
+        returnSignal->stackCleanup = (call.api == "_open" || call.api == "_write" || call.api == "_close" ||
+            call.api == "_open_osfhandle" || call.api == "_read" || call.api == "_lseek") ? 0 : 4 * count->second;
         returnSignal->connect(sigc::bind(sigc::mem_fun(*this, &FunctionCallLogger::onReturn), call));
         return;
     }
