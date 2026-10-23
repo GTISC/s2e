@@ -1483,6 +1483,8 @@ void FunctionCallLogger::recordLifecycle(S2EExecutionState *state, const Observe
     const bool io = call.api == "ReadFile" || call.api == "WriteFile";
     if (io || call.api == "CloseHandle") out << ",\"handle\":" << call.args[0];
     if (call.api == "GetProcAddress") out << ",\"module_handle\":" << call.args[0];
+    if (call.api == "CopyFileA" || call.api == "CopyFileW")
+        out << ",\"copy_arguments\":[" << call.args[0] << ',' << call.args[1] << ',' << call.args[2] << ']';
     if (io) {
         out << ",\"overlapped\":" << (call.args[4] ? "true" : "false")
             << ",\"count_address\":" << call.args[3];
@@ -2155,7 +2157,7 @@ void FunctionCallLogger::onCall(S2EExecutionState *state, const ModuleDescriptor
     // Positive effects use direct non-DLL calls in the monitored process tree.
     // DLL RegCloseKey calls are negative-only evidence that invalidates stale handles.
     // File handles stay state/PID/lifetime local in the existing observer map.
-    bool tracked = call.api.find("CredEnumerate") == 0 || call.api.find("Reg") == 0 || call.api == "ReadFile" || call.api == "WriteFile" || call.api == "GetProcAddress" || remoteProcess ||
+    bool tracked = call.api.find("CredEnumerate") == 0 || call.api.find("Reg") == 0 || call.api == "ReadFile" || call.api == "WriteFile" || call.api == "GetProcAddress" || call.api == "CopyFileA" || call.api == "CopyFileW" || remoteProcess ||
                    call.api == "CloseHandle" || call.api == "CreateFileA" || call.api == "CreateFileW";
     auto &counted = m_lifecycleCalls[s2e()->getCurrentInstanceIndex()];
     if (tracked && (call.recordEffect || call.api == "RegCloseKey") && !call.diagnostic && counted < 8192) {
