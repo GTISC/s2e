@@ -1077,6 +1077,24 @@ void FunctionCallLogger::recordCategory(S2EExecutionState *state, const Observed
         out << call.args[i];
     }
     out << ']';
+    if (call.api == "SamConnect" || call.api == "SamOpenDomain" || call.api == "SamOpenAlias" ||
+        call.api == "SamAddMemberToAlias" || call.api == "SamCloseHandle") {
+        out << ",\"sam_input_concrete\":" << (call.bufferConcrete ? "true" : "false")
+            << ",\"sam_input_sid_hex\":\"" << inputHex(call.bufferPrefix)
+            << "\",\"sam_server_name_hex\":\"" << inputHex(call.path)
+            << "\",\"sam_server_descriptor_hex\":\"" << inputHex(call.data) << "\"";
+        const bool opened = call.api == "SamConnect" || call.api == "SamOpenDomain" || call.api == "SamOpenAlias";
+        if (opened) {
+            const uint32_t address = call.args[call.api == "SamConnect" ? 1 : 3];
+            out << ",\"sam_output_address\":" << address;
+            if (returned) {
+                auto c = result == 0 && address && uint64_t(address) + 4 <= (uint64_t(1) << 32) ?
+                    dyn_cast_or_null<klee::ConstantExpr>(state->mem()->read(address, klee::Expr::Int32)) : nullptr;
+                out << ",\"sam_output_concrete\":" << (c ? "true" : "false")
+                    << ",\"sam_output_handle\":" << (c ? c->getZExtValue() : 0);
+            }
+        }
+    }
     if (call.api == "Sleep") {
         // Passive Windows 7 KUSER_SHARED_DATA tick sample. Preserve the raw
         // low/high/high consistency fields and multiplier at each boundary.
@@ -1482,6 +1500,11 @@ void FunctionCallLogger::recordLifecycle(S2EExecutionState *state, const Observe
     }
     const bool io = call.api == "ReadFile" || call.api == "WriteFile";
     if (io || call.api == "CloseHandle") out << ",\"handle\":" << call.args[0];
+    if (call.api == "WriteFile")
+        out << ",\"write_buffer_address\":" << call.args[1]
+            << ",\"write_prefix_concrete\":" << (call.bufferConcrete ? "true" : "false")
+            << ",\"write_prefix_hex\":\"" << inputHex(call.bufferPrefix)
+            << "\",\"write_prefix_bytes\":" << call.bufferPrefix.size();
     if (call.api == "GetProcAddress") out << ",\"module_handle\":" << call.args[0];
     if (call.api == "CopyFileA" || call.api == "CopyFileW")
         out << ",\"copy_arguments\":[" << call.args[0] << ',' << call.args[1] << ',' << call.args[2] << ']';
@@ -1595,7 +1618,7 @@ void FunctionCallLogger::onCall(S2EExecutionState *state, const ModuleDescriptor
     const bool networkModule = dest->Name == "ws2_32.dll";
     const bool audioModule = dest->Name == "winmm.dll";
     if (dest->Name != "kernel32.dll" && dest->Name != "kernelbase.dll" && dest->Name != "advapi32.dll" &&
-        dest->Name != "user32.dll" && dest->Name != "netapi32.dll" && dest->Name != "samcli.dll" && dest->Name != "wevtapi.dll" && dest->Name != "ntdll.dll" && dest->Name != "crypt32.dll" && dest->Name != "iphlpapi.dll" && dest->Name != "setupapi.dll" && dest->Name != "cryptdlg.dll" && dest->Name != "msvcrt.dll" && dest->Name != "powrprof.dll" && dest->Name != "sechost.dll" && dest->Name != "schedcli.dll" && dest->Name != "shell32.dll" &&
+        dest->Name != "user32.dll" && dest->Name != "netapi32.dll" && dest->Name != "samcli.dll" && dest->Name != "samlib.dll" && dest->Name != "wevtapi.dll" && dest->Name != "ntdll.dll" && dest->Name != "crypt32.dll" && dest->Name != "iphlpapi.dll" && dest->Name != "setupapi.dll" && dest->Name != "cryptdlg.dll" && dest->Name != "msvcrt.dll" && dest->Name != "powrprof.dll" && dest->Name != "sechost.dll" && dest->Name != "schedcli.dll" && dest->Name != "shell32.dll" &&
         !(m_observeNetwork && networkModule) && !(m_observeAudio && audioModule))
         return;
     ObservedWindowsCall call;
@@ -1633,6 +1656,7 @@ void FunctionCallLogger::onCall(S2EExecutionState *state, const ModuleDescriptor
         {"CertOpenStore", 5}, {"CertOpenSystemStoreA", 2}, {"CertOpenSystemStoreW", 2},
         {"CertAddStoreToCollection", 4}, {"CertCloseStore", 2},
         {"CertAddEncodedCertificateToStore", 6}, {"CertAddCertificateContextToStore", 4},
+        {"SamConnect", 4}, {"SamOpenDomain", 4}, {"SamOpenAlias", 4}, {"SamAddMemberToAlias", 2}, {"SamCloseHandle", 1},
         {"NetUserAdd", 4}, {"NetLocalGroupAddMembers", 5}, {"NetUserModalsGet", 3},
         {"NetUserGetInfo", 4}, {"NetUserDel", 2},
         {"PowerGetActiveScheme", 2}, {"PowerWriteACValueIndex", 5}, {"PowerSetActiveScheme", 2},
@@ -1673,6 +1697,7 @@ void FunctionCallLogger::onCall(S2EExecutionState *state, const ModuleDescriptor
         {"CertOpenStore", 5}, {"CertOpenSystemStoreA", 2}, {"CertOpenSystemStoreW", 2},
         {"CertAddStoreToCollection", 4}, {"CertCloseStore", 2},
         {"CertAddEncodedCertificateToStore", 6}, {"CertAddCertificateContextToStore", 4},
+        {"SamConnect", 4}, {"SamOpenDomain", 4}, {"SamOpenAlias", 4}, {"SamAddMemberToAlias", 2}, {"SamCloseHandle", 1},
         {"NetUserAdd", 4}, {"NetLocalGroupAddMembers", 5}, {"NetUserModalsGet", 3},
         {"NetUserGetInfo", 4}, {"NetUserDel", 2},
         {"PowerGetActiveScheme", 2}, {"PowerWriteACValueIndex", 5}, {"PowerSetActiveScheme", 2},
@@ -1825,10 +1850,48 @@ void FunctionCallLogger::onCall(S2EExecutionState *state, const ModuleDescriptor
     };
     if (categoryApis.count(call.api)) {
         auto &counted = m_categoryCalls[s2e()->getCurrentInstanceIndex()];
-        if ((!call.recordEffect && call.api != "_close" && call.api != "CloseServiceHandle") || call.diagnostic || counted >= 4096) return;
+        if ((!call.recordEffect && call.api != "_close" && call.api != "CloseServiceHandle" && call.api != "SamCloseHandle") || call.diagnostic || counted >= 4096) return;
         call.path.clear();
         const bool processCreate = call.api == "CreateProcessA" || call.api == "CreateProcessW" ||
             call.api == "CreateProcessAsUserA" || call.api == "CreateProcessAsUserW" || call.api == "CreateProcessWithTokenW";
+        const bool sam = call.api == "SamConnect" || call.api == "SamOpenDomain" || call.api == "SamOpenAlias" ||
+            call.api == "SamAddMemberToAlias" || call.api == "SamCloseHandle";
+        if (sam) {
+            call.bufferConcrete = true;
+            auto bytes = [&](uint64_t address, unsigned size, std::string &value) {
+                if (!address || address + size > (uint64_t(1) << 32)) return false;
+                for (unsigned i = 0; i < size; ++i) {
+                    auto c = dyn_cast_or_null<klee::ConstantExpr>(state->mem()->read(address + i, klee::Expr::Int8));
+                    if (!c) { value.clear(); return false; }
+                    value += char(c->getZExtValue());
+                }
+                return true;
+            };
+            if (call.api == "SamConnect" && call.args[0]) {
+                call.bufferConcrete = bytes(call.args[0], 8, call.data);
+                if (call.bufferConcrete) {
+                    const auto byte = [&](unsigned i) { return uint32_t(uint8_t(call.data[i])); };
+                    const uint32_t length = byte(0) | byte(1) << 8;
+                    const uint32_t maximum = byte(2) | byte(3) << 8;
+                    const uint32_t address = byte(4) | byte(5) << 8 | byte(6) << 16 | byte(7) << 24;
+                    call.bufferConcrete = !(length & 1) && length <= maximum && maximum <= 1024 &&
+                        (!length || address) && uint64_t(address) + length <= (uint64_t(1) << 32);
+                    for (unsigned i = 0; call.bufferConcrete && i < length; i += 2) {
+                        auto c = dyn_cast_or_null<klee::ConstantExpr>(state->mem()->read(uint64_t(address) + i, klee::Expr::Int16));
+                        if (!c || !c->getZExtValue() || c->getZExtValue() > 127) { call.bufferConcrete = false; break; }
+                        call.path += char(c->getZExtValue());
+                    }
+                }
+                if (!call.bufferConcrete) { call.data.clear(); call.path.clear(); }
+            } else if (call.api == "SamOpenDomain" || call.api == "SamAddMemberToAlias") {
+                const uint32_t address = call.args[call.api == "SamOpenDomain" ? 2 : 1];
+                std::string head;
+                call.bufferConcrete = bytes(address, 8, head) && uint8_t(head[0]) == 1 && uint8_t(head[1]) <= 15;
+                if (call.bufferConcrete)
+                    call.bufferConcrete = bytes(address, 8 + 4 * uint8_t(head[1]), call.bufferPrefix);
+                if (!call.bufferConcrete) call.bufferPrefix.clear();
+            }
+        }
         if (processCreate) {
             const bool user = call.api == "CreateProcessAsUserA" || call.api == "CreateProcessAsUserW";
             const bool token = call.api == "CreateProcessWithTokenW";
@@ -2176,7 +2239,19 @@ void FunctionCallLogger::onCall(S2EExecutionState *state, const ModuleDescriptor
         if (!dest->ToRuntime(calleePc, call.calleePc)) return;
         call.entryTime = std::chrono::duration_cast<std::chrono::nanoseconds>(
             std::chrono::steady_clock::now().time_since_epoch()).count();
-        if (call.api == "WriteFile") call.requested = call.args[2];
+        if (call.api == "WriteFile") {
+            call.requested = call.args[2];
+            const uint32_t size = std::min(call.requested, uint32_t(4096));
+            call.bufferConcrete = call.args[1] && size &&
+                uint64_t(call.args[1]) + size <= (uint64_t(1) << 32);
+            call.bufferPrefix.clear();
+            for (uint32_t i = 0; call.bufferConcrete && i < size; ++i) {
+                auto c = dyn_cast_or_null<klee::ConstantExpr>(
+                    state->mem()->read(uint64_t(call.args[1]) + i, klee::Expr::Int8));
+                if (!c) { call.bufferConcrete = false; call.bufferPrefix.clear(); break; }
+                call.bufferPrefix += char(c->getZExtValue());
+            }
+        }
         recordLifecycle(state, call, false, 0);
     }
     if (call.api == "WideCharToMultiByte") prepareAsciiConversion(state, call);
