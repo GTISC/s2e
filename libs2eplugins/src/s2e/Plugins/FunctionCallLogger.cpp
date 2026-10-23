@@ -67,6 +67,7 @@ public:
     std::set<std::tuple<uint64_t, uint64_t, uint32_t>> redirectedSockets;
     std::map<std::tuple<uint64_t, uint64_t, uint64_t, uint32_t>, doubling_loop::Witness> loopWitnesses;
     unsigned loopCalls = 0;
+    std::map<std::tuple<uint64_t, uint64_t, uint32_t>, ObservedScriptInterface> scriptInterfaces;
     static PluginState *factory(Plugin *p, S2EExecutionState *s) {
         return new FunctionCallLoggerState();
     }
@@ -326,6 +327,10 @@ void FunctionCallLogger::onProcessUnload(S2EExecutionState *state, uint64_t addr
             else ++it;
         }
     }
+    for (auto it = plgState->scriptInterfaces.begin(); it != plgState->scriptInterfaces.end();) {
+        if (std::get<0>(it->first) == pid) it = plgState->scriptInterfaces.erase(it);
+        else ++it;
+    }
     for (auto it = plgState->redirectedSockets.begin(); it != plgState->redirectedSockets.end();) {
         if (std::get<0>(*it) == pid) it = plgState->redirectedSockets.erase(it);
         else ++it;
@@ -340,6 +345,181 @@ static std::string inputHex(const std::string &bytes) {
         result += "0123456789abcdef"[c & 15];
     }
     return result;
+}
+
+// Read-only tracking of script COM interfaces. No guest call is synthesized,
+// redirected, skipped or summarized; all pointers/bytes must already be concrete.
+bool FunctionCallLogger::observeScriptCall(S2EExecutionState *state,
+        const ModuleDescriptorConstPtr &source, const ModuleDescriptorConstPtr &dest,
+        uint64_t callerPc, uint64_t calleePc, const FunctionMonitor::ReturnSignalPtr &returnSignal) {
+    if (!source || (source->Name.size() >= 4 && source->Name.substr(source->Name.size()-4) == ".dll") ||
+        (dest->Name != "ole32.dll" && dest->Name != "vbscript.dll" && dest->Name != "jscript.dll")) return false;
+    ObservedScriptCall call;
+    bool diagnostic;
+    if (!m_regions->getProcessContext(state, call.pid, call.lifetime, call.depth, diagnostic) || diagnostic || call.depth != 0 ||
+        !source->ToRuntime(callerPc, call.caller) || !dest->ToRuntime(calleePc, call.callee)) return false;
+    call.module = dest->Name; call.base = dest->LoadBase;
+    call.tid = static_cast<OSMonitor *>(s2e()->getPlugin("OSMonitor"))->getTid(state);
+    auto word = [&](uint64_t address, uint32_t &value) {
+        if (!address || address + 4 > (uint64_t(1) << 32)) return false;
+        auto c = dyn_cast_or_null<klee::ConstantExpr>(state->mem()->read(address, klee::Expr::Int32));
+        if (!c) return false; value = c->getZExtValue(); return true;
+    };
+    auto guid = [&](uint32_t address, std::string &bytes) {
+        if (!address || uint64_t(address)+16 > (uint64_t(1) << 32)) return false;
+        for (unsigned i=0; i<16; ++i) {
+            auto c = dyn_cast_or_null<klee::ConstantExpr>(state->mem()->read(uint64_t(address)+i, klee::Expr::Int8));
+            if (!c) { bytes.clear(); return false; }
+            bytes += char(c->getZExtValue());
+        }
+        return true;
+    };
+    DECLARE_PLUGINSTATE(FunctionCallLoggerState, state);
+    if (dest->Name == "ole32.dll") {
+        const auto key = dest->Path + ":" + dest->Name;
+        auto exports = m_exports.find(key);
+        if (exports == m_exports.end()) {
+            auto pe = std::dynamic_pointer_cast<vmi::PEFile>(m_vmi->getFromDisk(dest->Path, dest->Name, true));
+            if (!pe) return false;
+            std::map<uint64_t, std::string> names;
+            for (const auto &entry : pe->getExports()) names[entry.first] = entry.second;
+            exports = m_exports.emplace(key, std::move(names)).first;
+        }
+        auto name = exports->second.find(calleePc - dest->NativeBase);
+        if (name == exports->second.end() || (name->second != "CoGetClassObject" && name->second != "CoCreateInstance")) return false;
+        call.api = name->second; call.count = 5;
+    } else {
+        if (!word(state->regs()->getSp()+4, call.object)) return false;
+        auto known = plgState->scriptInterfaces.find(std::make_tuple(call.pid, call.lifetime, call.object));
+        if (known == plgState->scriptInterfaces.end() || known->second.module != call.module ||
+            !word(call.object, call.vtable) || call.vtable != known->second.vtable) return false;
+        const auto &iface = known->second;
+        unsigned slot = 0, count = 0;
+        std::string api;
+        if (iface.methods.size() > 0 && call.callee == iface.methods[0]) { slot=0; count=3; api="ScriptQueryInterface"; }
+        else if (iface.methods.size() > 2 && call.callee == iface.methods[2]) { slot=2; count=1; api="ScriptRelease"; }
+        else if (iface.kind == "factory" && iface.methods.size() > 3 && call.callee == iface.methods[3]) { slot=3; count=4; api="ScriptCreateInstance"; }
+        else if (iface.kind == "active" && iface.methods.size() > 5 && call.callee == iface.methods[5]) { slot=5; count=2; api="ScriptSetState"; }
+        else if (iface.kind == "parse32" && iface.methods.size() > 5 && call.callee == iface.methods[5]) { slot=5; count=10; api="ScriptParseText"; }
+        else if (iface.kind == "parse32" && iface.methods.size() > 3 && call.callee == iface.methods[3]) { slot=3; count=1; api="ScriptInitNew"; }
+        if (api.empty()) return false;
+        uint32_t target;
+        if (!word(uint64_t(call.vtable)+slot*4, target) || target != call.callee) return false;
+        call.api=api; call.count=count; call.slot=slot; call.method=true; call.kind=iface.kind; call.clsid=iface.clsid;
+    }
+    for (unsigned i=0; i<call.count; ++i)
+        if (!word(state->regs()->getSp()+4*(i+1), call.args[i])) return false;
+    if (!call.method) {
+        if (!guid(call.args[0], call.clsid) || !guid(call.args[3], call.iid)) return false;
+        const auto id = inputHex(call.clsid);
+        if (id != "41374fb5075bcf11a4b000aa004a55e8" && id != "60c214f4c06acf11b6d100aa00bbbb58") return false;
+        call.output=call.args[4];
+    } else if (call.api == "ScriptQueryInterface" || call.api == "ScriptCreateInstance") {
+        const unsigned iidIndex = call.api == "ScriptQueryInterface" ? 1 : 2;
+        if (!guid(call.args[iidIndex], call.iid)) return false;
+        call.output=call.args[iidIndex+1];
+    } else if (call.api == "ScriptParseText") {
+        const uint32_t address = call.args[1];
+        call.textConcrete = address && uint64_t(address)+262144 <= (uint64_t(1) << 32);
+        bool ended = false;
+        for (unsigned i=0; call.textConcrete && i<131072; ++i) {
+            auto c = dyn_cast_or_null<klee::ConstantExpr>(state->mem()->read(uint64_t(address)+i*2, klee::Expr::Int16));
+            if (!c) { call.textConcrete=false; break; }
+            auto value=c->getZExtValue();
+            if (!value) { ended=true; break; }
+            call.text += char(value & 255); call.text += char(value >> 8);
+        }
+        call.textConcrete = call.textConcrete && ended;
+        if (!call.textConcrete) call.text.clear();
+    }
+    auto &count=m_scriptCalls[s2e()->getCurrentInstanceIndex()];
+    if (count >= 256) return false;
+    call.callId=++count;
+    call.entered=std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+    recordScript(state, call, false, 0);
+    returnSignal->stackCleanup=call.count*4;
+    returnSignal->connect(sigc::bind(sigc::mem_fun(*this, &FunctionCallLogger::onScriptReturn), call));
+    return true;
+}
+
+void FunctionCallLogger::onScriptReturn(S2EExecutionState *state, const ModuleDescriptorConstPtr &source,
+        const ModuleDescriptorConstPtr &dest, uint64_t pc, ObservedScriptCall call) {
+    uint64_t pid, lifetime, depth; bool diagnostic; uint32_t result;
+    const auto tid=static_cast<OSMonitor *>(s2e()->getPlugin("OSMonitor"))->getTid(state);
+    if (!m_regions->getProcessContext(state,pid,lifetime,depth,diagnostic) || diagnostic || pid!=call.pid ||
+        lifetime!=call.lifetime || tid!=call.tid || !state->regs()->read(CPU_OFFSET(regs[R_EAX]), &result, 4, false)) return;
+    DECLARE_PLUGINSTATE(FunctionCallLoggerState, state);
+    if (call.api == "ScriptRelease" && result == 0) {
+        // Conservatively invalidate all interfaces of the released engine class.
+        for (auto it=plgState->scriptInterfaces.begin(); it!=plgState->scriptInterfaces.end();) {
+            if (std::get<0>(it->first)==pid && std::get<1>(it->first)==lifetime && it->second.clsid==call.clsid)
+                it=plgState->scriptInterfaces.erase(it);
+            else ++it;
+        }
+    }
+    uint32_t object=0;
+    ObservedScriptInterface iface;
+    bool valid=false;
+    auto word = [&](uint64_t address, uint32_t &value) {
+        if (!address || address+4 > (uint64_t(1) << 32)) return false;
+        auto c=dyn_cast_or_null<klee::ConstantExpr>(state->mem()->read(address,klee::Expr::Int32));
+        if (!c) return false; value=c->getZExtValue(); return true;
+    };
+    if (result==0 && call.output && word(call.output,object) && object && word(object,iface.vtable) && iface.vtable) {
+        const auto iid=inputHex(call.iid);
+        iface.kind=iid=="0100000000000000c000000000000046" ? "factory" :
+                   iid=="e12a1abbf9a4cf118f2000805f2cd064" ? "active" :
+                   iid=="e22a1abbf9a4cf118f2000805f2cd064" ? "parse32" : "other";
+        iface.clsid=call.clsid;
+        iface.module=inputHex(call.clsid)=="41374fb5075bcf11a4b000aa004a55e8" ? "vbscript.dll" : "jscript.dll";
+        const unsigned size=iface.kind=="factory" ? 4 : (iface.kind=="other" ? 3 : 6);
+        valid=true;
+        for (unsigned i=0;i<size;++i) {
+            uint32_t method;
+            if (!word(uint64_t(iface.vtable)+i*4,method) || !method) { valid=false; break; }
+            auto module=s2e()->getPlugin<ModuleMap>()->getModule(state,pid,method);
+            if (!module || module->Name!=iface.module) { valid=false; break; }
+            iface.methods.push_back(method);
+        }
+        if (valid && plgState->scriptInterfaces.size()<64)
+            plgState->scriptInterfaces[std::make_tuple(pid,lifetime,object)]=iface;
+    }
+    recordScript(state,call,true,result,valid?object:0,valid?&iface:nullptr);
+}
+
+void FunctionCallLogger::recordScript(S2EExecutionState *state, const ObservedScriptCall &call,
+        bool returned, uint32_t result, uint32_t outputObject, const ObservedScriptInterface *iface) {
+    const auto now=std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+    std::string prefix;
+    bool concrete=returned && call.callee && call.callee+32 <= (uint64_t(1)<<32);
+    for (unsigned i=0;concrete && i<32;++i) {
+        auto c=dyn_cast_or_null<klee::ConstantExpr>(state->mem()->read(call.callee+i,klee::Expr::Int8));
+        if (!c) { concrete=false; prefix.clear(); break; }
+        prefix+=char(c->getZExtValue());
+    }
+    std::ofstream out(s2e()->getOutputFilename("script-observations.jsonl"),std::ios::app);
+    out << "{\"schema\":1,\"event\":\"" << (returned?"return":"enter") << "\",\"instance\":" << s2e()->getCurrentInstanceIndex()
+        << ",\"state\":" << state->getID() << ",\"pid\":" << call.pid << ",\"lifetime\":" << call.lifetime
+        << ",\"depth\":" << call.depth << ",\"tid\":" << call.tid << ",\"diagnostic_lineage\":false,\"call_id\":" << call.callId
+        << ",\"time_ns\":" << (returned?uint64_t(now):call.entered) << ",\"entry_time_ns\":" << call.entered
+        << ",\"api\":\"" << call.api << "\",\"module_hex\":\"" << inputHex(call.module) << "\",\"caller_pc\":" << call.caller
+        << ",\"callee_pc\":" << call.callee << ",\"callee_module_base\":" << call.base
+        << ",\"class_id_hex\":\"" << inputHex(call.clsid) << "\",\"requested_iid_hex\":\"" << inputHex(call.iid)
+        << "\",\"interface_kind\":\"" << call.kind << "\",\"interface_method\":" << (call.method?"true":"false")
+        << ",\"interface_object\":" << call.object << ",\"interface_vtable\":" << call.vtable << ",\"vtable_slot\":" << call.slot
+        << ",\"output_address\":" << call.output << ",\"args\":[";
+    for (unsigned i=0;i<call.count;++i) { if (i) out << ','; out << call.args[i]; }
+    out << "],\"script_text_concrete\":" << (call.textConcrete?"true":"false") << ",\"script_text_utf16_hex\":\"" << inputHex(call.text) << "\"";
+    if (returned) {
+        out << ",\"result\":" << result << ",\"return_code_concrete\":" << (concrete?"true":"false")
+            << ",\"return_code_hex\":\"" << inputHex(prefix) << "\",\"output_object\":" << outputObject
+            << ",\"output_kind\":\"" << (iface?iface->kind:"") << "\",\"output_vtable\":" << (iface?iface->vtable:0)
+            << ",\"output_methods\":[";
+        if (iface) for (unsigned i=0;i<iface->methods.size();++i) { if (i) out << ','; out << iface->methods[i]; }
+        out << ']';
+    }
+    out << "}\n"; out.close();
+    if (!out) s2e()->getExecutor()->terminateState(*state,"Script observation journal failed");
 }
 
 void FunctionCallLogger::parseSelectedInput() {
@@ -1404,6 +1584,7 @@ void FunctionCallLogger::onCall(S2EExecutionState *state, const ModuleDescriptor
           m_observeNetwork || m_observeAudio) ||
         state->getPointerSize() != 4 || !dest)
         return;
+    if (observeScriptCall(state, source, dest, callerPc, calleePc, returnSignal)) return;
     const bool networkModule = dest->Name == "ws2_32.dll";
     const bool audioModule = dest->Name == "winmm.dll";
     if (dest->Name != "kernel32.dll" && dest->Name != "kernelbase.dll" && dest->Name != "advapi32.dll" &&

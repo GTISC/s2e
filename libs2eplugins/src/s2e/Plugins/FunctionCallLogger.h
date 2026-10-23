@@ -40,6 +40,20 @@ namespace plugins {
 
 class ExecutableRegionMonitor;
 class Vmi;
+// Passive COM script observations are distinct from modeled Windows effects.
+struct ObservedScriptInterface {
+    std::string kind, module, clsid;
+    uint32_t vtable = 0;
+    std::vector<uint32_t> methods;
+};
+struct ObservedScriptCall {
+    std::string api, module, clsid, iid, kind, text;
+    uint64_t pid = 0, lifetime = 0, depth = 0, tid = 0, caller = 0, callee = 0, base = 0, entered = 0;
+    uint32_t args[10] = {}, object = 0, vtable = 0, slot = 0, output = 0, callId = 0;
+    unsigned count = 0;
+    bool textConcrete = false, method = false;
+};
+
 struct ObservedWindowsCall {
     std::string api, path, value, data, module, threadStartModule, threadStartSymbol;
     std::string originalSockaddr, effectiveSockaddr, peerSockaddr, bufferPrefix;
@@ -106,6 +120,15 @@ private:
     unsigned m_largeReads = 0;
     std::map<unsigned, unsigned> m_lifecycleCalls;
     std::map<unsigned, unsigned> m_categoryCalls;
+    std::map<unsigned, unsigned> m_scriptCalls;
+    bool observeScriptCall(S2EExecutionState *state, const ModuleDescriptorConstPtr &source,
+                           const ModuleDescriptorConstPtr &dest, uint64_t callerPc, uint64_t calleePc,
+                           const FunctionMonitor::ReturnSignalPtr &returnSignal);
+    void onScriptReturn(S2EExecutionState *state, const ModuleDescriptorConstPtr &source,
+                        const ModuleDescriptorConstPtr &dest, uint64_t pc, ObservedScriptCall call);
+    void recordScript(S2EExecutionState *state, const ObservedScriptCall &call, bool returned,
+                      uint32_t result, uint32_t outputObject = 0,
+                      const ObservedScriptInterface *outputInterface = nullptr);
     void recordCategory(S2EExecutionState *state, const ObservedWindowsCall &call, bool returned, uint32_t result);
     void recordLifecycle(S2EExecutionState *state, const ObservedWindowsCall &call, bool returned, uint32_t result);
     void observeLargeRead(S2EExecutionState *state, const ObservedWindowsCall &call, uint32_t result,
