@@ -1193,13 +1193,21 @@ void FunctionCallLogger::recordCategory(S2EExecutionState *state, const Observed
             << ",\"crt_read_buffer_concrete\":" << (concrete ? "true" : "false")
             << ",\"crt_read_buffer_hex\":\"" << inputHex(bytes) << "\"";
     }
-    if (call.api == "DllRegisterServer" || call.api == "Control_RunDLLW")
+    if (call.api == "Py_Main") {
+        out << ",\"interpreter_argv_hex\":[";
+        for (unsigned i = 0; i < call.interpreterArguments.size(); ++i) {
+            if (i) out << ',';
+            out << "\"" << inputHex(call.interpreterArguments[i]) << "\"";
+        }
+        out << ']';
+    }
+    if (call.api == "Py_Main" || call.api == "DllRegisterServer" || call.api == "Control_RunDLLW")
         out << ",\"callback_module_base\":" << call.calleeModuleBase
             << ",\"callback_export_rva\":" << (call.calleePc - call.calleeModuleBase)
             << ",\"callback_code_address\":" << call.calleePc
             << ",\"callback_code_concrete\":" << (call.bufferConcrete ? "true" : "false")
             << ",\"callback_code_hex\":\"" << inputHex(call.bufferPrefix) << "\"";
-    if (returned && call.api == "Control_RunDLLW") {
+    if (returned && (call.api == "Py_Main" || call.api == "Control_RunDLLW")) {
         // A call target may still be demand-paged at entry. Observe again only
         // after the actual native return; do not fault pages in or choose bytes.
         std::string observed;
@@ -1650,7 +1658,7 @@ void FunctionCallLogger::onCall(S2EExecutionState *state, const ModuleDescriptor
     const bool networkModule = dest->Name == "ws2_32.dll";
     const bool audioModule = dest->Name == "winmm.dll";
     if (dest->Name != "kernel32.dll" && dest->Name != "kernelbase.dll" && dest->Name != "advapi32.dll" &&
-        dest->Name != "user32.dll" && dest->Name != "netapi32.dll" && dest->Name != "samcli.dll" && dest->Name != "samlib.dll" && dest->Name != "wevtapi.dll" && dest->Name != "ntdll.dll" && dest->Name != "crypt32.dll" && dest->Name != "iphlpapi.dll" && dest->Name != "setupapi.dll" && dest->Name != "cryptdlg.dll" && dest->Name != "msvcrt.dll" && dest->Name != "powrprof.dll" && dest->Name != "sechost.dll" && dest->Name != "schedcli.dll" && dest->Name != "shell32.dll" &&
+        dest->Name != "user32.dll" && dest->Name != "netapi32.dll" && dest->Name != "samcli.dll" && dest->Name != "samlib.dll" && dest->Name != "wevtapi.dll" && dest->Name != "ntdll.dll" && dest->Name != "crypt32.dll" && dest->Name != "iphlpapi.dll" && dest->Name != "setupapi.dll" && dest->Name != "cryptdlg.dll" && dest->Name != "msvcrt.dll" && dest->Name != "python27.dll" && dest->Name != "powrprof.dll" && dest->Name != "sechost.dll" && dest->Name != "schedcli.dll" && dest->Name != "shell32.dll" &&
         !(m_observeNetwork && networkModule) && !(m_observeAudio && audioModule))
         return;
     ObservedWindowsCall call;
@@ -1705,6 +1713,7 @@ void FunctionCallLogger::onCall(S2EExecutionState *state, const ModuleDescriptor
         {"UpdateProcThreadAttribute", 7}, {"DeleteProcThreadAttributeList", 1}, {"GetLastError", 0},
         {"_open", 2}, {"_write", 3}, {"_close", 1}, {"_open_osfhandle", 2}, {"_read", 3}, {"_lseek", 3},
         {"fopen", 2}, {"_wfopen", 2}, {"fclose", 1}, {"fwrite", 4},
+        {"Py_Main", 2},
         {"DeviceIoControl", 8}, {"GetFileSizeEx", 2}, {"SetConsoleNumberOfCommandsW", 2}, {"Sleep", 1},
         {"GetConsoleCommandHistoryLengthW", 1}, {"ExpungeConsoleCommandHistoryW", 1},
         {"FindFirstFileW", 2}, {"FindNextFileW", 2}, {"FindClose", 1},
@@ -1747,6 +1756,7 @@ void FunctionCallLogger::onCall(S2EExecutionState *state, const ModuleDescriptor
         {"UpdateProcThreadAttribute", 7}, {"DeleteProcThreadAttributeList", 1}, {"GetLastError", 0},
         {"_open", 2}, {"_write", 3}, {"_close", 1}, {"_open_osfhandle", 2}, {"_read", 3}, {"_lseek", 3},
         {"fopen", 2}, {"_wfopen", 2}, {"fclose", 1}, {"fwrite", 4},
+        {"Py_Main", 2},
         {"DeviceIoControl", 8}, {"GetFileSizeEx", 2}, {"SetConsoleNumberOfCommandsW", 2}, {"Sleep", 1},
         {"GetConsoleCommandHistoryLengthW", 1}, {"ExpungeConsoleCommandHistoryW", 1},
         {"NetGroupEnum", 7}, {"NetLocalGroupEnum", 7}, {"NetUserEnum", 8},
@@ -2013,6 +2023,16 @@ void FunctionCallLogger::onCall(S2EExecutionState *state, const ModuleDescriptor
             !readText(call.args[0], call.path, 256)) return;
         if (call.api == "Control_RunDLLW" && call.args[2] && !readText(call.args[2], call.path, 256)) return;
         if (call.api == "FindFirstFileW" && !readText(call.args[0], call.path, 512)) return;
+        if (call.api == "Py_Main") {
+            if (!call.args[0] || call.args[0] > 8 || !call.args[1] ||
+                uint64_t(call.args[1]) + 4 * call.args[0] > (uint64_t(1) << 32)) return;
+            for (unsigned i = 0; i < call.args[0]; ++i) {
+                uint32_t address = 0;
+                std::string argument;
+                if (!read32(uint64_t(call.args[1]) + 4 * i, address) || !readText(address, argument, 128)) return;
+                call.interpreterArguments.push_back(argument);
+            }
+        }
         if ((call.api == "fopen" || call.api == "_wfopen") &&
             (!readText(call.args[0], call.path) || !readText(call.args[1], call.value, 16))) return;
         if (call.api == "fwrite") {
@@ -2182,7 +2202,7 @@ void FunctionCallLogger::onCall(S2EExecutionState *state, const ModuleDescriptor
         if (!dest->ToRuntime(calleePc, call.calleePc)) return;
         call.entryTime = std::chrono::duration_cast<std::chrono::nanoseconds>(
             std::chrono::steady_clock::now().time_since_epoch()).count();
-        if (call.api == "DllRegisterServer" || call.api == "Control_RunDLLW") {
+        if (call.api == "Py_Main" || call.api == "DllRegisterServer" || call.api == "Control_RunDLLW") {
             call.calleeModuleBase = dest->LoadBase;
             if (!call.calleeModuleBase || call.calleePc < call.calleeModuleBase) return;
             call.bufferConcrete = call.calleePc && call.calleePc + 32 <= (uint64_t(1) << 32);
@@ -2197,7 +2217,7 @@ void FunctionCallLogger::onCall(S2EExecutionState *state, const ModuleDescriptor
         // is not needed for data-write evidence and must not be guessed/read.
         returnSignal->stackCleanup = (call.api == "_open" || call.api == "_write" || call.api == "_close" ||
             call.api == "_open_osfhandle" || call.api == "_read" || call.api == "_lseek" ||
-            call.api == "fopen" || call.api == "_wfopen" || call.api == "fclose" || call.api == "fwrite") ? 0 : 4 * count->second;
+            call.api == "Py_Main" || call.api == "fopen" || call.api == "_wfopen" || call.api == "fclose" || call.api == "fwrite") ? 0 : 4 * count->second;
         returnSignal->connect(sigc::bind(sigc::mem_fun(*this, &FunctionCallLogger::onReturn), call));
         return;
     }

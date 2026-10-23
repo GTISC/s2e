@@ -79,6 +79,7 @@ struct ObservedWindowsCall {
     std::vector<klee::ref<klee::Expr>> conversionOutput;
     std::string conversionSeed;
     std::vector<std::string> conversionArrays;
+    std::vector<std::string> interpreterArguments;
 };
 
 enum S2E_FUNCTIONCALLLOGGER_COMMANDS {
