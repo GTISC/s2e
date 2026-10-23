@@ -881,7 +881,7 @@ void FunctionCallLogger::recordCategory(S2EExecutionState *state, const Observed
     const bool accountEnum = call.api == "NetUserEnum";
     const bool groupEnum = call.api == "NetGroupEnum" || call.api == "NetLocalGroupEnum";
     const bool enumerated = (accountEnum || groupEnum) && (result == 0 || result == 234);
-    const bool voidResult = wallTime || fileTime || call.api == "keybd_event" || call.api == "mouse_event" || call.api == "DeleteProcThreadAttributeList";
+    const bool voidResult = wallTime || fileTime || call.api == "keybd_event" || call.api == "mouse_event" || call.api == "DeleteProcThreadAttributeList" || call.api == "Control_RunDLLW";
     std::ofstream out(s2e()->getOutputFilename("category-observations.jsonl"), std::ios::app);
     out << "{\"schema\":1,\"instance\":" << s2e()->getCurrentInstanceIndex()
         << ",\"state\":" << state->getID() << ",\"pid\":" << call.pid
@@ -947,12 +947,26 @@ void FunctionCallLogger::recordCategory(S2EExecutionState *state, const Observed
             << ",\"crt_read_buffer_concrete\":" << (concrete ? "true" : "false")
             << ",\"crt_read_buffer_hex\":\"" << inputHex(bytes) << "\"";
     }
-    if (call.api == "DllRegisterServer")
+    if (call.api == "DllRegisterServer" || call.api == "Control_RunDLLW")
         out << ",\"callback_module_base\":" << call.calleeModuleBase
             << ",\"callback_export_rva\":" << (call.calleePc - call.calleeModuleBase)
             << ",\"callback_code_address\":" << call.calleePc
             << ",\"callback_code_concrete\":" << (call.bufferConcrete ? "true" : "false")
             << ",\"callback_code_hex\":\"" << inputHex(call.bufferPrefix) << "\"";
+    if (returned && call.api == "Control_RunDLLW") {
+        // A call target may still be demand-paged at entry. Observe again only
+        // after the actual native return; do not fault pages in or choose bytes.
+        std::string observed;
+        bool concrete = call.calleePc && call.calleePc + 32 <= (uint64_t(1) << 32);
+        for (unsigned i = 0; concrete && i < 32; ++i) {
+            auto c = dyn_cast_or_null<klee::ConstantExpr>(state->mem()->read(call.calleePc + i, klee::Expr::Int8));
+            if (!c) { concrete = false; observed.clear(); break; }
+            observed += char(c->getZExtValue());
+        }
+        out << ",\"callback_return_code_address\":" << call.calleePc
+            << ",\"callback_return_code_concrete\":" << (concrete ? "true" : "false")
+            << ",\"callback_return_code_hex\":\"" << inputHex(observed) << "\"";
+    }
     const bool adminNet = call.api == "NetUserAdd" || call.api == "NetLocalGroupAddMembers" || call.api == "NetUserModalsGet" || call.api == "NetUserGetInfo" || call.api == "NetUserDel";
     if (adminNet)
         out << ",\"server_name_concrete\":" << (call.serverConcrete ? "true" : "false")
@@ -1350,7 +1364,7 @@ void FunctionCallLogger::onCall(S2EExecutionState *state, const ModuleDescriptor
     const bool networkModule = dest->Name == "ws2_32.dll";
     const bool audioModule = dest->Name == "winmm.dll";
     if (dest->Name != "kernel32.dll" && dest->Name != "kernelbase.dll" && dest->Name != "advapi32.dll" &&
-        dest->Name != "user32.dll" && dest->Name != "netapi32.dll" && dest->Name != "samcli.dll" && dest->Name != "wevtapi.dll" && dest->Name != "ntdll.dll" && dest->Name != "crypt32.dll" && dest->Name != "iphlpapi.dll" && dest->Name != "setupapi.dll" && dest->Name != "cryptdlg.dll" && dest->Name != "msvcrt.dll" && dest->Name != "powrprof.dll" && dest->Name != "sechost.dll" && dest->Name != "schedcli.dll" &&
+        dest->Name != "user32.dll" && dest->Name != "netapi32.dll" && dest->Name != "samcli.dll" && dest->Name != "wevtapi.dll" && dest->Name != "ntdll.dll" && dest->Name != "crypt32.dll" && dest->Name != "iphlpapi.dll" && dest->Name != "setupapi.dll" && dest->Name != "cryptdlg.dll" && dest->Name != "msvcrt.dll" && dest->Name != "powrprof.dll" && dest->Name != "sechost.dll" && dest->Name != "schedcli.dll" && dest->Name != "shell32.dll" &&
         !(m_observeNetwork && networkModule) && !(m_observeAudio && audioModule))
         return;
     ObservedWindowsCall call;
@@ -1398,7 +1412,7 @@ void FunctionCallLogger::onCall(S2EExecutionState *state, const ModuleDescriptor
         {"QueryServiceStatus", 2}, {"QueryServiceStatusEx", 5}, {"CloseServiceHandle", 1},
         {"QueryServiceConfigA", 4}, {"QueryServiceConfigW", 4},
         {"SetFileAttributesA", 2}, {"SetFileAttributesW", 2}, {"GetExtendedTcpTable", 6}, {"SetupDiEnumDeviceInfo", 3},
-        {"DllRegisterServer", 0},
+        {"DllRegisterServer", 0}, {"Control_RunDLLW", 4},
         {"CreateProcessAsUserA", 11}, {"CreateProcessAsUserW", 11}, {"CreateProcessWithTokenW", 9},
         {"CreateProcessA", 10}, {"CreateProcessW", 10}, {"InitializeProcThreadAttributeList", 4},
         {"UpdateProcThreadAttribute", 7}, {"DeleteProcThreadAttributeList", 1}, {"GetLastError", 0},
@@ -1436,7 +1450,7 @@ void FunctionCallLogger::onCall(S2EExecutionState *state, const ModuleDescriptor
         {"QueryServiceStatus", 2}, {"QueryServiceStatusEx", 5}, {"CloseServiceHandle", 1},
         {"QueryServiceConfigA", 4}, {"QueryServiceConfigW", 4},
         {"SetFileAttributesA", 2}, {"SetFileAttributesW", 2}, {"GetExtendedTcpTable", 6}, {"SetupDiEnumDeviceInfo", 3},
-        {"DllRegisterServer", 0},
+        {"DllRegisterServer", 0}, {"Control_RunDLLW", 4},
         {"CreateProcessAsUserA", 11}, {"CreateProcessAsUserW", 11}, {"CreateProcessWithTokenW", 9},
         {"CreateProcessA", 10}, {"CreateProcessW", 10}, {"InitializeProcThreadAttributeList", 4},
         {"UpdateProcThreadAttribute", 7}, {"DeleteProcThreadAttributeList", 1}, {"GetLastError", 0},
@@ -1667,6 +1681,7 @@ void FunctionCallLogger::onCall(S2EExecutionState *state, const ModuleDescriptor
         if (call.api == "SetConsoleNumberOfCommandsW" && !readText(call.args[1], call.path, 256)) return;
         if ((call.api == "GetConsoleCommandHistoryLengthW" || call.api == "ExpungeConsoleCommandHistoryW") &&
             !readText(call.args[0], call.path, 256)) return;
+        if (call.api == "Control_RunDLLW" && call.args[2] && !readText(call.args[2], call.path, 256)) return;
         if (call.api == "_open" && !readText(call.args[0], call.path)) return;
         if (call.api == "_write") {
             call.requested = std::min(call.args[2], uint32_t(4096));
@@ -1824,7 +1839,7 @@ void FunctionCallLogger::onCall(S2EExecutionState *state, const ModuleDescriptor
         if (!dest->ToRuntime(calleePc, call.calleePc)) return;
         call.entryTime = std::chrono::duration_cast<std::chrono::nanoseconds>(
             std::chrono::steady_clock::now().time_since_epoch()).count();
-        if (call.api == "DllRegisterServer") {
+        if (call.api == "DllRegisterServer" || call.api == "Control_RunDLLW") {
             call.calleeModuleBase = dest->LoadBase;
             if (!call.calleeModuleBase || call.calleePc < call.calleeModuleBase) return;
             call.bufferConcrete = call.calleePc && call.calleePc + 32 <= (uint64_t(1) << 32);
@@ -1943,7 +1958,7 @@ void FunctionCallLogger::onReturn(S2EExecutionState *state, const ModuleDescript
         uint32_t categoryResult = 0;
         const bool voidResult = call.api == "GetSystemTime" || call.api == "GetLocalTime" ||
             call.api == "GetSystemTimeAsFileTime" || call.api == "GetSystemTimePreciseAsFileTime" ||
-            call.api == "keybd_event" || call.api == "mouse_event" || call.api == "DeleteProcThreadAttributeList";
+            call.api == "keybd_event" || call.api == "mouse_event" || call.api == "DeleteProcThreadAttributeList" || call.api == "Control_RunDLLW";
         if (!voidResult && !state->regs()->read(CPU_OFFSET(regs[R_EAX]), &categoryResult, 4, false)) return;
         if (!diagnostic) recordCategory(state, call, true, categoryResult);
         return;
